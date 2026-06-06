@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101820">
+    <meta name="description" content="Download, transcribe, and summarize SonicApp recorder audio from a browser-only PWA.">
+    <title>SonicApp Recorder Sync</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icons/robot-192.png" sizes="192x192" type="image/png">
+    <link rel="apple-touch-icon" href="icons/robot-192.png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <img src="icons/robot-192.png" alt="" width="56" height="56">
+        <div>
+        <p class="eyebrow">SonicApp</p>
+        <h1>Recorder Sync</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="offline-badge" id="offlineBadge">Preparing offline</span>
+        <button class="install-button" id="installButton" type="button" hidden>Install</button>
+        <button class="icon-button" id="settingsButton" type="button" aria-label="Open settings" title="Settings">
+          <span aria-hidden="true">⚙</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="status-strip" aria-live="polite">
+        <div>
+          <span class="status-dot" id="settingsDot"></span>
+          <span>AI settings</span>
+          <strong id="settingsState">Needed</strong>
+        </div>
+        <div>
+          <span class="status-dot muted" id="wifiDot"></span>
+          <span>Hotspot</span>
+          <strong id="wifiState">Not checked</strong>
+        </div>
+        <div>
+          <span class="status-dot muted" id="deviceDot"></span>
+          <span>Recorder</span>
+          <strong id="deviceState">Idle</strong>
+        </div>
+        <div>
+          <span class="status-dot muted" id="pwaDot"></span>
+          <span>Offline app</span>
+          <strong id="pwaState">Preparing</strong>
+        </div>
+      </section>
+
+      <section class="workflow">
+        <div class="panel primary-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Step 1</p>
+              <h2>Connect to the recorder hotspot</h2>
+            </div>
+          </div>
+          <p class="body-copy">
+            Connect this computer or phone to the SonicApp recorder WiFi hotspot, then use the controls below to discover and download recordings from <code>192.168.1.1</code>.
+          </p>
+          <div class="callout">
+            <strong id="hotspotName">Hotspot unknown</strong>
+            <span id="hotspotHint">If the hotspot changes, use BLE discovery for device <code>CB08</code> and then connect manually in your system WiFi settings.</span>
+          </div>
+          <p class="network-note">
+            GitHub Pages is HTTPS. If your recorder only serves plain HTTP, the browser may block direct downloads from <code>192.168.1.1</code>; use manual import when that happens.
+          </p>
+          <div class="button-row">
+            <button id="bleButton" type="button">Try BLE Discovery</button>
+            <button id="confirmWifiButton" type="button">I am connected</button>
+            <button id="downloadButton" type="button" class="accent">Download Recordings</button>
+            <label class="file-button">
+              <input id="manualImportInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm" multiple>
+              <span>Import Audio</span>
+            </label>
+          </div>
+          <pre class="log" id="logOutput" aria-label="Activity log"></pre>
+        </div>
+
+        <aside class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Library</p>
+              <h2>Saved Recordings</h2>
+            </div>
+            <button id="clearButton" class="ghost" type="button">Clear</button>
+          </div>
+          <div class="stats">
+            <div>
+              <strong id="recordingCount">0</strong>
+              <span>recordings</span>
+            </div>
+            <div>
+              <strong id="transcribedCount">0</strong>
+              <span>transcribed</span>
+            </div>
+            <div>
+              <strong id="summarizedCount">0</strong>
+              <span>summarized</span>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="library-section">
+        <div class="section-heading">
+          <h2>Recordings</h2>
+          <div class="button-row compact">
+            <button id="transcribeAllButton" type="button">Transcribe All</button>
+            <button id="summarizeAllButton" type="button">Summarize All</button>
+          </div>
+        </div>
+        <div class="recordings-list" id="recordingsList"></div>
+      </section>
+    </main>
+
+    <dialog id="settingsDialog">
+      <form method="dialog" class="settings-form" id="settingsForm">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Required first</p>
+            <h2>AI connection settings</h2>
+          </div>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Close settings" title="Close">×</button>
+        </div>
+        <p class="body-copy">
+          These values are saved in this browser's localStorage. Because this site has no backend, API requests are made directly from the browser.
+        </p>
+        <label>
+          <span>Base URL</span>
+          <input id="baseUrlInput" name="baseUrl" type="url" placeholder="https://api.openai.com/v1" required>
+        </label>
+        <label>
+          <span>API key</span>
+          <input id="apiKeyInput" name="apiKey" type="password" autocomplete="off" placeholder="sk-..." required>
+        </label>
+        <label>
+          <span>Transcription model</span>
+          <input id="transcribeModelInput" name="transcribeModel" type="text" placeholder="gpt-4o-transcribe-diarize" required>
+        </label>
+        <label>
+          <span>Summary model</span>
+          <input id="summaryModelInput" name="summaryModel" type="text" placeholder="gpt-4.1" required>
+        </label>
+        <label>
+          <span>Contact list</span>
+          <textarea id="contactsInput" name="contacts" rows="5" placeholder="[Contact Name 1] - [Title/Role]"></textarea>
+        </label>
+        <menu>
+          <button value="cancel" type="submit" class="ghost">Cancel</button>
+          <button id="saveSettingsButton" value="default" type="submit" class="accent">Save Settings</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <template id="recordingTemplate">
+      <article class="recording-card">
+        <div class="recording-main">
+          <div>
+            <h3></h3>
+            <p class="meta"></p>
+          </div>
+          <audio controls></audio>
+        </div>
+        <div class="recording-actions">
+          <button class="transcribe-button" type="button">Transcribe</button>
+          <button class="summarize-button" type="button">Summarize it</button>
+          <button class="download-file-button ghost" type="button">Save Audio</button>
+        </div>
+        <details class="transcript-block">
+          <summary>Transcript</summary>
+          <pre></pre>
+        </details>
+        <details class="summary-block">
+          <summary>Summary</summary>
+          <pre></pre>
+        </details>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
