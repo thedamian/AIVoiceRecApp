@@ -769,12 +769,34 @@ async function tryBleDiscovery() {
 
     log(`Selected: "${device.name}". Connecting to GATT server...`);
     setStatus("wifi", "BLE connecting", "");
-    const server = await device.gatt.connect();
+
+    // Race the connect against a 12s timeout — a hanging connect usually means
+    // another app (e.g. SoniCloud) already holds the BLE connection to this device.
+    const server = await Promise.race([
+      device.gatt.connect(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(
+          "GATT connect timed out (12s). If SoniCloud is open on this Mac, quit it and try again."
+        )), 12000)
+      )
+    ]);
     setStatus("wifi", "BLE connected", "");
 
     log("GATT connected. Enumerating services...");
-    const services = await server.getPrimaryServices();
-    log(`Found ${services.length} GATT service(s).`);
+    // Try the known recorder service UUID directly first (most reliable),
+    // then fall back to getPrimaryServices() for any other services present.
+    const services = [];
+    try {
+      services.push(await server.getPrimaryService(RECORDER_BLE_SERVICE));
+      log(`Found recorder service ${RECORDER_BLE_SERVICE}.`);
+    } catch {
+      log(`Recorder service ${RECORDER_BLE_SERVICE} not found on device.`);
+    }
+    const allServices = await server.getPrimaryServices().catch(() => []);
+    for (const s of allServices) {
+      if (!services.some((x) => x.uuid === s.uuid)) services.push(s);
+    }
+    log(`Found ${services.length} GATT service(s) total.`);
     const discovered = [device.name || ""];
     const writableCharacteristics = [];
 
