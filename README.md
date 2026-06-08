@@ -36,6 +36,13 @@ AI transcription and summarization still require network access to the configure
 
 The app tries these endpoints on `http://192.168.1.1`:
 
+It first probes the recorder protocol found in the installed SoniCloud app:
+
+- WebSocket: `ws://192.168.1.1:27689`
+- Observed native app methods/strings: `DeviceWiFiSocket`, `getRecordFileList`, `backRecordFileJson`, `record_file_state`, and transfer command `"cmd":"5"`
+
+Then it falls back to HTTP discovery:
+
 - `/api/recordings`
 - `/api/files`
 - `/api/audio`

@@ -159,6 +159,32 @@
       </form>
     </dialog>
 
+    <dialog id="hotspotDialog">
+      <form method="dialog" class="hotspot-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Recorder hotspot found</p>
+            <h2>Connect to this WiFi</h2>
+          </div>
+          <button class="icon-button" value="close" type="submit" aria-label="Close hotspot details" title="Close">×</button>
+        </div>
+        <div class="hotspot-card">
+          <span>WiFi name</span>
+          <strong id="hotspotDialogSsid"></strong>
+        </div>
+        <div class="hotspot-card" id="hotspotPasswordRow" hidden>
+          <span>Password</span>
+          <strong id="hotspotDialogPassword"></strong>
+        </div>
+        <p class="body-copy">
+          Switch your computer or phone to this WiFi network in system settings, then come back here and click <strong>I am connected</strong>.
+        </p>
+        <menu>
+          <button value="close" type="submit" class="accent">Got it</button>
+        </menu>
+      </form>
+    </dialog>
+
     <template id="recordingTemplate">
       <article class="recording-card">
         <div class="recording-main">

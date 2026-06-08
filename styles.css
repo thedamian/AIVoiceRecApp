@@ -395,7 +395,8 @@ dialog::backdrop {
   background: rgba(16, 24, 32, 0.54);
 }
 
-.settings-form {
+.settings-form,
+.hotspot-form {
   padding: 22px;
 }
 
@@ -417,6 +418,26 @@ dialog::backdrop {
 
 .settings-form textarea {
   resize: vertical;
+}
+
+.hotspot-card {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  background: #f8fbf9;
+}
+
+.hotspot-card span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hotspot-card strong {
+  font-size: 22px;
+  overflow-wrap: anywhere;
 }
 
 menu {

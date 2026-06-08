@@ -3,7 +3,15 @@ const HOTSPOT_KEY = "sonicapp.hotspot.v1";
 const DB_NAME = "sonicapp-recordings";
 const DB_VERSION = 1;
 const DEVICE_BASE_URL = "http://192.168.1.1";
-const APP_CACHE_NAME = "sonicapp-pwa-v1";
+const DEVICE_WS_URL = "ws://192.168.1.1:27689";
+const APP_CACHE_NAME = "sonicapp-pwa-v3";
+const RECORDER_BLE_SERVICE = "0000ae20-0000-1000-8000-00805f9b34fb";
+const RECORDER_BLE_CHARACTERISTICS = [
+  "0000ae21-0000-1000-8000-00805f9b34fb",
+  "0000ae22-0000-1000-8000-00805f9b34fb",
+  "0000ae23-0000-1000-8000-00805f9b34fb",
+  "0000ae24-0000-1000-8000-00805f9b34fb"
+];
 const AUDIO_EXTENSIONS = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm"];
 const RECORDING_ENDPOINTS = [
   "/api/recordings",
@@ -13,6 +21,26 @@ const RECORDING_ENDPOINTS = [
   "/files",
   "/list",
   "/"
+];
+const RECORDING_WS_COMMANDS = [
+  { cmd: "4" },
+  { cmd: "3" },
+  { cmd: "2" },
+  { cmd: "1" },
+  { cmd: "getRecordFileList" }
+];
+const BLE_TEXT_DECODER = new TextDecoder();
+const BLE_TEXT_ENCODER = new TextEncoder();
+const BLE_WIFI_PROBE_COMMANDS = [
+  { cmd: "connectDeviceWiFi" },
+  { cmd: "getDeviceWiFiState" },
+  { cmd: "getWiFiHotspotState" },
+  { cmd: "12" },
+  { cmd: "11" },
+  { cmd: "10" },
+  "connectDeviceWiFi",
+  "getDeviceWiFiState",
+  "getWiFiHotspotState"
 ];
 
 const SUMMARY_SYSTEM_PROMPT = `## System Role & Objective
@@ -63,6 +91,10 @@ const elements = {
   offlineBadge: document.querySelector("#offlineBadge"),
   settingsDialog: document.querySelector("#settingsDialog"),
   settingsForm: document.querySelector("#settingsForm"),
+  hotspotDialog: document.querySelector("#hotspotDialog"),
+  hotspotDialogSsid: document.querySelector("#hotspotDialogSsid"),
+  hotspotDialogPassword: document.querySelector("#hotspotDialogPassword"),
+  hotspotPasswordRow: document.querySelector("#hotspotPasswordRow"),
   baseUrlInput: document.querySelector("#baseUrlInput"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   transcribeModelInput: document.querySelector("#transcribeModelInput"),
@@ -200,6 +232,13 @@ function renderHotspotState() {
       ? `Password discovered: ${hotspot.password}. Connect manually in your system WiFi settings.`
       : "Connect manually in your system WiFi settings.";
   }
+}
+
+function showHotspotDialog(hotspot) {
+  elements.hotspotDialogSsid.textContent = hotspot.ssid;
+  elements.hotspotDialogPassword.textContent = hotspot.password || "";
+  elements.hotspotPasswordRow.hidden = !hotspot.password;
+  if (!elements.hotspotDialog.open) elements.hotspotDialog.showModal();
 }
 
 function fillSettingsForm() {
@@ -367,66 +406,322 @@ function extractRecordingCandidates(payload) {
     .filter((item) => item.url && isAudioUrl(item.url));
 }
 
-async function discoverRecordingCandidates() {
+async function discoverAllMethods() {
+  const allCandidates = [];
+  const seen = new Set();
+
+  const addUnique = (candidates) => {
+    for (const c of candidates) {
+      const key = c.wsPath || c.url;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        allCandidates.push(c);
+      }
+    }
+  };
+
+  // WebSocket discovery
+  log(`--- WebSocket (${DEVICE_WS_URL}) ---`);
+  if (!canUseInsecureDeviceSocket()) {
+    log(`SKIP: HTTPS pages cannot open insecure ws:// sockets. Serve over HTTP or localhost to use the WebSocket path.`);
+  } else {
+    const wsCandidates = await discoverRecordingCandidatesOverWebSocket();
+    if (wsCandidates.length) {
+      log(`WebSocket: SUCCESS — ${wsCandidates.length} file(s) found.`);
+      addUnique(wsCandidates);
+    } else {
+      log(`WebSocket: no files found (device did not respond or list was empty).`);
+    }
+  }
+
+  // HTTP endpoint discovery
+  log(`--- HTTP endpoints (${DEVICE_BASE_URL}) ---`);
   for (const endpoint of RECORDING_ENDPOINTS) {
     try {
-      log(`Checking ${DEVICE_BASE_URL}${endpoint}`);
       const payload = await requestJsonOrText(endpoint);
       const candidates = extractRecordingCandidates(payload);
       if (candidates.length) {
-        log(`Found ${candidates.length} recording link(s) at ${endpoint}.`);
-        return candidates;
+        log(`HTTP ${endpoint}: SUCCESS — ${candidates.length} file(s) found.`);
+        addUnique(candidates);
+      } else {
+        log(`HTTP ${endpoint}: responded (${payload.type}) — no audio files in response.`);
       }
     } catch (error) {
-      log(`No usable list at ${endpoint}: ${error.message}`);
+      log(`HTTP ${endpoint}: FAILED — ${error.message}`);
     }
   }
-  return [];
+
+  log(`--- Discovery complete: ${allCandidates.length} unique file(s) across all methods ---`);
+  return allCandidates;
+}
+
+function canUseInsecureDeviceSocket() {
+  return location.protocol !== "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+}
+
+function extractCandidatesFromAnyPayload(payload) {
+  const found = [];
+  const visit = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value !== "object") return;
+
+    const path = value.path || value.file || value.url || value.href || value.filename || value.name;
+    const name = value.name || value.recordName || value.filename || (path ? inferNameFromUrl(path, found.length) : "");
+    const looksLikeAudio = path && (isAudioUrl(path) || /\.pcm$/i.test(path) || /\.opus$/i.test(path));
+    if (looksLikeAudio) {
+      found.push({
+        url: path,
+        wsPath: path,
+        name,
+        date: parseDate(value.date || value.time || value.createdAt || value.created),
+        metadata: { ...value, source: DEVICE_WS_URL }
+      });
+    }
+
+    Object.values(value).forEach(visit);
+  };
+  visit(payload);
+  return found;
+}
+
+async function discoverRecordingCandidatesOverWebSocket() {
+  if (!canUseInsecureDeviceSocket()) {
+    log(`Skipping ${DEVICE_WS_URL}; HTTPS pages cannot usually open insecure ws:// device sockets.`);
+    return [];
+  }
+
+  return new Promise((resolve) => {
+    let socket;
+    let settled = false;
+    const candidates = [];
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket?.close();
+      } catch {
+        // No-op.
+      }
+      resolve(dedupeCandidates(candidates));
+    };
+    const timeout = setTimeout(settle, 5000);
+
+    try {
+      log(`Checking recorder WebSocket ${DEVICE_WS_URL}`);
+      socket = new WebSocket(DEVICE_WS_URL);
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        log(`WebSocket connected. Sending ${RECORDING_WS_COMMANDS.length} file-list command(s):`);
+        RECORDING_WS_COMMANDS.forEach((command) => {
+          const payload = JSON.stringify(command);
+          log(`  Send: ${payload}`);
+          socket.send(payload);
+        });
+      });
+      socket.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") {
+          log(`WebSocket received ${event.data.byteLength || 0} binary bytes during discovery (not a file list).`);
+          return;
+        }
+        log(`WebSocket recv: ${event.data.slice(0, 300)}`);
+        try {
+          candidates.push(...extractCandidatesFromAnyPayload(JSON.parse(event.data)));
+        } catch {
+          // Some device frames may be plain status text.
+        }
+        if (candidates.length) {
+          clearTimeout(timeout);
+          setTimeout(settle, 500);
+        }
+      });
+      socket.addEventListener("error", () => {
+        log("Recorder WebSocket did not respond.");
+      });
+      socket.addEventListener("close", () => {
+        clearTimeout(timeout);
+        settle();
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      log(`Recorder WebSocket failed: ${error.message}`);
+      settle();
+    }
+  });
+}
+
+function dedupeCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = candidate.wsPath || candidate.url;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function downloadRecordings() {
   setStatus("device", "Scanning", "");
   elements.downloadButton.disabled = true;
   try {
-    const candidates = await discoverRecordingCandidates();
+    const candidates = await discoverAllMethods();
     if (!candidates.length) {
-      throw new Error("No recordings were found. The recorder may use a different listing endpoint.");
+      throw new Error("No recordings found via any method. Check the log above for details.");
     }
 
+    log(`--- Downloading ${candidates.length} file(s) ---`);
     let saved = 0;
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index];
-      const url = new URL(candidate.url, DEVICE_BASE_URL).href;
-      log(`Downloading ${url}`);
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-      const blob = await response.blob();
-      const id = makeRecordingId(url, blob);
-      const recording = {
-        id,
-        name: candidate.name || inferNameFromUrl(url, index),
-        sourceUrl: url,
-        date: candidate.date || null,
-        metadata: candidate.metadata || {},
-        blob,
-        downloadedAt: new Date().toISOString(),
-        createdAt: Date.now() - index,
-        transcript: "",
-        transcribedAt: "",
-        summary: "",
-        summarizedAt: ""
-      };
-      await dbAction("readwrite", (store) => store.put(recording));
-      saved += 1;
+      log(`Downloading [${index + 1}/${candidates.length}] ${candidate.name}...`);
+      try {
+        const blob = await downloadCandidateDiagnostic(candidate);
+        const url = new URL(candidate.url, DEVICE_BASE_URL).href;
+        const id = makeRecordingId(url, blob);
+        await dbAction("readwrite", (store) => store.put({
+          id,
+          name: candidate.name || inferNameFromUrl(url, index),
+          sourceUrl: url,
+          date: candidate.date || null,
+          metadata: candidate.metadata || {},
+          blob,
+          downloadedAt: new Date().toISOString(),
+          createdAt: Date.now() - index,
+          transcript: "",
+          transcribedAt: "",
+          summary: "",
+          summarizedAt: ""
+        }));
+        saved += 1;
+      } catch {
+        log(`  Skipping ${candidate.name}: all transfer methods failed.`);
+      }
     }
-    setStatus("device", "Downloaded", "ok");
-    log(`Saved ${saved} recording(s).`);
+
+    setStatus("device", saved ? "Downloaded" : "Failed", saved ? "ok" : "error");
+    log(`--- Saved ${saved} of ${candidates.length} recording(s) ---`);
     await refreshRecordings();
   } catch (error) {
     setStatus("device", "Failed", "error");
-    log(`Download failed: ${error.message}`);
+    log(`Download error: ${error.message}`);
   } finally {
     elements.downloadButton.disabled = false;
+  }
+}
+
+async function downloadRecordingOverHttp(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+  return response.blob();
+}
+
+async function downloadRecordingOverWebSocket(candidate) {
+  if (!canUseInsecureDeviceSocket()) {
+    throw new Error("This HTTPS page cannot open the recorder's insecure ws:// file socket.");
+  }
+
+  return new Promise((resolve, reject) => {
+    let socket;
+    let done = false;
+    let idleTimer;
+    const chunks = [];
+    const transferCommands = [
+      { cmd: "5", path: candidate.wsPath },
+      { cmd: "5", data: { path: candidate.wsPath } },
+      { cmd: "download", path: candidate.wsPath }
+    ];
+
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(idleTimer);
+      try {
+        socket?.close();
+      } catch {
+        // No-op.
+      }
+      if (!chunks.length) {
+        reject(new Error(`Recorder did not send binary audio for ${candidate.name}.`));
+        return;
+      }
+      const type = candidate.name.toLowerCase().endsWith(".wav") ? "audio/wav" : "application/octet-stream";
+      resolve(new Blob(chunks, { type }));
+    };
+
+    const fail = (message) => {
+      if (done) return;
+      done = true;
+      clearTimeout(idleTimer);
+      try {
+        socket?.close();
+      } catch {
+        // No-op.
+      }
+      reject(new Error(message));
+    };
+
+    try {
+      socket = new WebSocket(DEVICE_WS_URL);
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        log(`Requesting ${candidate.name} over recorder WebSocket.`);
+        transferCommands.forEach((command) => socket.send(JSON.stringify(command)));
+        idleTimer = setTimeout(finish, 6000);
+      });
+      socket.addEventListener("message", (event) => {
+        if (typeof event.data === "string") {
+          log(`Recorder transfer: ${event.data.slice(0, 220)}`);
+          try {
+            const payload = JSON.parse(event.data);
+            const progress = Number(payload?.data?.progress ?? payload?.progress);
+            if (progress >= 100 && chunks.length) setTimeout(finish, 300);
+          } catch {
+            // Some status frames are not JSON.
+          }
+          return;
+        }
+        chunks.push(event.data);
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(finish, 1200);
+      });
+      socket.addEventListener("error", () => fail("Recorder WebSocket transfer failed."));
+      socket.addEventListener("close", () => {
+        if (!done && chunks.length) finish();
+      });
+    } catch (error) {
+      fail(error.message);
+    }
+  });
+}
+
+async function downloadCandidateDiagnostic(candidate) {
+  const wsPath = candidate.wsPath || candidate.url;
+  const httpUrl = new URL(candidate.url, DEVICE_BASE_URL).href;
+
+  // Try WebSocket transfer (cmd: "5") — always attempt, even for HTTP-discovered files
+  if (!canUseInsecureDeviceSocket()) {
+    log(`  WebSocket transfer SKIP: HTTPS page cannot open ws:// socket.`);
+  } else {
+    try {
+      const blob = await downloadRecordingOverWebSocket({ ...candidate, wsPath });
+      log(`  WebSocket transfer SUCCESS: ${formatBytes(blob.size)}.`);
+      return blob;
+    } catch (error) {
+      log(`  WebSocket transfer FAILED: ${error.message}.`);
+    }
+  }
+
+  // Try HTTP transfer
+  try {
+    const blob = await downloadRecordingOverHttp(httpUrl);
+    log(`  HTTP transfer SUCCESS: ${formatBytes(blob.size)}.`);
+    return blob;
+  } catch (error) {
+    log(`  HTTP transfer FAILED: ${error.message}.`);
+    throw error;
   }
 }
 
@@ -461,48 +756,81 @@ async function importManualFiles(fileList) {
 
 async function tryBleDiscovery() {
   if (!navigator.bluetooth) {
-    log("Web Bluetooth is not available in this browser. Use Chrome or Edge on HTTPS.");
+    log("Web Bluetooth is not available. Use Chrome or Edge over HTTPS.");
     return;
   }
 
   try {
-    log("Opening Bluetooth chooser for devices named CB08...");
+    log("Opening Bluetooth picker — looking for devices named CB08...");
     const device = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: "CB08" }],
-      optionalServices: ["battery_service", "device_information"]
+      optionalServices: [RECORDER_BLE_SERVICE, "battery_service", "device_information"]
     });
-    setStatus("wifi", "BLE connected", "");
-    log(`Selected ${device.name || "CB08"}. Connecting to GATT...`);
+
+    log(`Selected: "${device.name}". Connecting to GATT server...`);
+    setStatus("wifi", "BLE connecting", "");
     const server = await device.gatt.connect();
+    setStatus("wifi", "BLE connected", "");
+
+    log("GATT connected. Enumerating services...");
     const services = await server.getPrimaryServices();
-    const discovered = [];
+    log(`Found ${services.length} GATT service(s).`);
+    const discovered = [device.name || ""];
+    const writableCharacteristics = [];
 
     for (const service of services) {
+      log(`Service: ${service.uuid}`);
       const characteristics = await service.getCharacteristics();
       for (const characteristic of characteristics) {
-        if (!characteristic.properties.read) continue;
-        try {
-          const value = await characteristic.readValue();
-          const text = new TextDecoder().decode(value.buffer).replace(/\0/g, "").trim();
-          if (text) discovered.push(text);
-        } catch {
-          // Some readable characteristics still reject reads depending on pairing state.
+        const uuid = characteristic.uuid.toLowerCase();
+        const props = Object.entries(characteristic.properties)
+          .filter(([, v]) => v).map(([k]) => k).join(", ");
+        const isKnown = RECORDER_BLE_CHARACTERISTICS.includes(uuid);
+        log(`  Char ${uuid.slice(4, 8).toUpperCase()} [${props}]${isKnown ? " ← known recorder char" : ""}`);
+
+        if (characteristic.properties.notify || characteristic.properties.indicate) {
+          try {
+            await characteristic.startNotifications();
+            characteristic.addEventListener("characteristicvaluechanged", (event) => {
+              const text = decodeBleValue(event.target.value);
+              if (text) {
+                log(`  BLE notify ${uuid.slice(4, 8).toUpperCase()}: ${text.slice(0, 220)}`);
+                discovered.push(text);
+                handleDiscoveredHotspot(discovered);
+              }
+            });
+          } catch (error) {
+            log(`  Notify subscribe failed: ${error.message}`);
+          }
+        }
+
+        if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
+          writableCharacteristics.push(characteristic);
+        }
+
+        if (characteristic.properties.read) {
+          try {
+            const text = decodeBleValue(await characteristic.readValue());
+            if (text) {
+              log(`  BLE read ${uuid.slice(4, 8).toUpperCase()}: ${text.slice(0, 220)}`);
+              discovered.push(text);
+              handleDiscoveredHotspot(discovered);
+            }
+          } catch (error) {
+            log(`  Read failed: ${error.message}`);
+          }
         }
       }
     }
 
-    const combined = discovered.join("\n");
-    const ssid = findValue(combined, /(ssid|hotspot|wifi)[\s:=]+([^\n\r,;]+)/i);
-    const password = findValue(combined, /(pass|password|pwd)[\s:=]+([^\n\r,;]+)/i);
-    if (ssid || password) {
-      const hotspot = { ssid: ssid || "SonicApp recorder hotspot", password: password || "", discoveredAt: new Date().toISOString() };
-      saveHotspot(hotspot);
-      renderHotspotState();
+    log(`Found ${writableCharacteristics.length} writable characteristic(s). Requesting WiFi hotspot credentials...`);
+    await probeBleForWifiName(writableCharacteristics, discovered);
+
+    if (handleDiscoveredHotspot(discovered)) {
       setStatus("wifi", "Hotspot found", "ok");
-      log(`BLE discovery found hotspot details: ${ssid || "SSID unknown"}. Connect to it in system WiFi settings.`);
     } else {
       setStatus("wifi", "Manual connect", "");
-      log("BLE connected, but no readable hotspot details were exposed. Connect to the recorder hotspot manually, then click I am connected.");
+      log("No hotspot credentials found in BLE responses. Connect to the recorder WiFi manually, then click I am connected.");
     }
   } catch (error) {
     setStatus("wifi", "BLE failed", "error");
@@ -510,9 +838,91 @@ async function tryBleDiscovery() {
   }
 }
 
-function findValue(text, regex) {
+function handleDiscoveredHotspot(discovered) {
+  const hotspot = extractHotspotDetails(discovered);
+  if (!hotspot.ssid && !hotspot.password) return false;
+
+  const savedHotspot = {
+    ssid: hotspot.ssid || "SonicApp recorder hotspot",
+    password: hotspot.password || "",
+    discoveredAt: new Date().toISOString()
+  };
+  saveHotspot(savedHotspot);
+  renderHotspotState();
+  showHotspotDialog(savedHotspot);
+  setStatus("wifi", "Hotspot found", "ok");
+  log(`BLE discovery found hotspot details: ${savedHotspot.ssid}. Connect to it in system WiFi settings.`);
+  return true;
+}
+
+function decodeBleValue(value) {
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  const text = BLE_TEXT_DECODER.decode(bytes).replace(/\0/g, "").trim();
+  if (text) return text;
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+}
+
+async function probeBleForWifiName(characteristics, discovered) {
+  if (!characteristics.length) {
+    log("No writable characteristics found. Cannot send WiFi hotspot probe commands.");
+    return;
+  }
+
+  for (const characteristic of characteristics) {
+    const uuid = characteristic.uuid.slice(4, 8).toUpperCase();
+    for (const command of BLE_WIFI_PROBE_COMMANDS) {
+      const payload = typeof command === "string" ? command : JSON.stringify(command);
+      try {
+        const bytes = BLE_TEXT_ENCODER.encode(payload);
+        if (characteristic.properties.writeWithoutResponse && characteristic.writeValueWithoutResponse) {
+          await characteristic.writeValueWithoutResponse(bytes);
+        } else {
+          await characteristic.writeValue(bytes);
+        }
+        log(`  BLE write → ${uuid}: ${payload}`);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (error) {
+        log(`  BLE write → ${uuid} rejected (${payload.slice(0, 40)}): ${error.message}`);
+      }
+    }
+  }
+
+  log("Waiting 2s for device response...");
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  const hotspot = extractHotspotDetails(discovered);
+  if (!hotspot.ssid) {
+    log("No WiFi credentials found in BLE responses. All raw BLE data received:");
+    discovered.filter(Boolean).forEach((item, i) => log(`  [${i}] ${item.slice(0, 120)}`));
+  }
+}
+
+function extractHotspotDetails(chunks) {
+  const combined = chunks.filter(Boolean).join("\n");
+  const parsed = parseJsonHotspotDetails(chunks) || {};
+  return {
+    ssid: parsed.ssid || findValue(combined, /"wifiName"\s*:\s*"([^"]+)"/i, 1) || findValue(combined, /(ssid|hotspot|wifi(?:name)?)[\s:=]+([^\n\r,;{}"]+)/i, 2),
+    password: parsed.password || findValue(combined, /(pass|password|pwd)[\s:=]+([^\n\r,;{}"]+)/i, 2)
+  };
+}
+
+function parseJsonHotspotDetails(chunks) {
+  for (const chunk of chunks) {
+    try {
+      const payload = JSON.parse(chunk);
+      const data = payload.data || payload;
+      const ssid = data.wifiName || data.ssid || data.hotspot || data.wifi;
+      const password = data.password || data.pass || data.pwd || data.wifiPassword;
+      if (ssid || password) return { ssid, password };
+    } catch {
+      // Not JSON.
+    }
+  }
+  return null;
+}
+
+function findValue(text, regex, group = 2) {
   const match = text.match(regex);
-  return match?.[2]?.trim() || "";
+  return match?.[group]?.trim() || "";
 }
 
 async function pingDevice() {
@@ -520,9 +930,10 @@ async function pingDevice() {
   try {
     await fetch(DEVICE_BASE_URL, { cache: "no-store", mode: "no-cors" });
     setStatus("wifi", "Connected", "ok");
-    log(`Browser reached ${DEVICE_BASE_URL}. You can download recordings now.`);
+    log(`Reached ${DEVICE_BASE_URL}. Starting file discovery across all methods...`);
+    downloadRecordings();
   } catch (error) {
-    setStatus("wifi", "Unconfirmed", "error");
+    setStatus("wifi", "Unreachable", "error");
     log(`Could not reach ${DEVICE_BASE_URL}: ${error.message}`);
   }
 }

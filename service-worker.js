@@ -1,4 +1,4 @@
-const CACHE_VERSION = "sonicapp-pwa-v1";
+const CACHE_VERSION = "sonicapp-pwa-v3";
 const APP_SHELL = [
   "./",
   "index.html",
