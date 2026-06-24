@@ -3,213 +3,184 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#101820">
-    <meta name="description" content="Download, transcribe, and summarize SonicApp recorder audio from a browser-only PWA.">
-    <title>SonicApp Recorder Sync</title>
-    <link rel="manifest" href="manifest.webmanifest">
-    <link rel="icon" href="icons/robot-192.png" sizes="192x192" type="image/png">
-    <link rel="apple-touch-icon" href="icons/robot-192.png">
-    <link rel="stylesheet" href="styles.css">
+    <meta name="theme-color" content="#f6f0e8">
+    <title>SoniCloud Web</title>
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/robot.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/robot.svg">
+    <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
     <header class="topbar">
       <div class="brand-lockup">
-        <img src="icons/robot-192.png" alt="" width="56" height="56">
+        <img class="brand-icon" src="./icons/robot.svg" alt="">
         <div>
-        <p class="eyebrow">SonicApp</p>
-        <h1>Recorder Sync</h1>
+          <h1>SoniCloud Web</h1>
+          <p id="appSubtitle">Recorder transfer, transcription, and summaries</p>
         </div>
       </div>
-      <div class="topbar-actions">
-        <span class="offline-badge" id="offlineBadge">Preparing offline</span>
-        <button class="install-button" id="installButton" type="button" hidden>Install</button>
-        <button class="icon-button" id="settingsButton" type="button" aria-label="Open settings" title="Settings">
-          <span aria-hidden="true">⚙</span>
+      <div class="top-actions">
+        <span id="offlineBadge" class="pill">Checking cache</span>
+        <button id="settingsButton" class="icon-button" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 8.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4Zm8.4 3.2-2-.5a7.6 7.6 0 0 0-.7-1.7l1.1-1.8-2.2-2.2-1.8 1a7 7 0 0 0-1.7-.6l-.5-2.1H9.4l-.5 2.1a7 7 0 0 0-1.7.7l-1.8-1.1-2.2 2.2 1.1 1.8c-.3.5-.6 1.1-.7 1.7l-2 .5v3.1l2 .5c.2.6.4 1.2.7 1.7l-1.1 1.8 2.2 2.2 1.8-1.1c.5.3 1.1.6 1.7.7l.5 2.1h3.2l.5-2.1c.6-.2 1.2-.4 1.7-.7l1.8 1.1 2.2-2.2-1.1-1.8c.3-.5.6-1.1.7-1.7l2-.5v-3.1Z"></path>
+          </svg>
         </button>
       </div>
     </header>
 
     <main class="app-shell">
-      <section class="status-strip" aria-live="polite">
-        <div>
-          <span class="status-dot" id="settingsDot"></span>
-          <span>AI settings</span>
-          <strong id="settingsState">Needed</strong>
-        </div>
-        <div>
-          <span class="status-dot muted" id="wifiDot"></span>
-          <span>Hotspot</span>
-          <strong id="wifiState">Not checked</strong>
-        </div>
-        <div>
-          <span class="status-dot muted" id="deviceDot"></span>
-          <span>Recorder</span>
-          <strong id="deviceState">Idle</strong>
-        </div>
-        <div>
-          <span class="status-dot muted" id="pwaDot"></span>
-          <span>Offline app</span>
-          <strong id="pwaState">Preparing</strong>
-        </div>
+      <section class="command-strip" aria-label="Primary actions">
+        <button id="connectBleButton" class="primary-action" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10-5 5V2l5 5L7 17"></path></svg>
+          Connect BLE
+        </button>
+        <button id="findHotspotButton" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5a14 14 0 0 1 18 0M6.5 13a9 9 0 0 1 11 0M10 16.5a4 4 0 0 1 4 0M12 20h.01"></path></svg>
+          Find Hotspot
+        </button>
+        <button id="wifiReadyButton" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>
+          On Recorder Wi-Fi
+        </button>
+        <button id="downloadAllButton" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"></path></svg>
+          Download New
+        </button>
+        <label class="file-action">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9m0 0 4 4m-4-4-4 4M4 3h16v4H4z"></path></svg>
+          Import Audio
+          <input id="fileImportInput" type="file" multiple accept="audio/*,.wav,.mp3,.m4a,.webm,.opus,.pcm">
+        </label>
       </section>
 
-      <section class="workflow">
-        <div class="panel primary-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Step 1</p>
-              <h2>Connect to the recorder hotspot</h2>
+      <section class="workspace">
+        <aside class="side-stack">
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Device</h2>
+              <span id="bleBadge" class="status-dot">Idle</span>
             </div>
-          </div>
-          <p class="body-copy">
-            Connect this computer or phone to the SonicApp recorder WiFi hotspot, then use the controls below to discover and download recordings from <code>192.168.1.1</code>.
-          </p>
-          <div class="callout">
-            <strong id="hotspotName">Hotspot unknown</strong>
-            <span id="hotspotHint">If the hotspot changes, use BLE discovery for device <code>CB08</code> and then connect manually in your system WiFi settings.</span>
-          </div>
-          <p class="network-note">
-            GitHub Pages is HTTPS. If your recorder only serves plain HTTP, the browser may block direct downloads from <code>192.168.1.1</code>; use manual import when that happens.
-          </p>
-          <div class="button-row">
-            <button id="bleButton" type="button">Try BLE Discovery</button>
-            <button id="confirmWifiButton" type="button">I am connected</button>
-            <button id="downloadButton" type="button" class="accent">Download Recordings</button>
-            <label class="file-button">
-              <input id="manualImportInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm" multiple>
-              <span>Import Audio</span>
-            </label>
-          </div>
-          <pre class="log" id="logOutput" aria-label="Activity log"></pre>
-        </div>
+            <dl class="compact-list">
+              <div><dt>Bluetooth</dt><dd id="bleStatus">Not connected</dd></div>
+              <div><dt>Write char</dt><dd><select id="bleCharSelect"></select></dd></div>
+              <div><dt>Hotspot</dt><dd id="hotspotName">Unknown</dd></div>
+              <div><dt>Socket</dt><dd id="socketStatus">Closed</dd></div>
+            </dl>
+          </section>
 
-        <aside class="panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Library</p>
-              <h2>Saved Recordings</h2>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Recorder Files</h2>
+              <span id="remoteCount" class="pill subtle">0 found</span>
             </div>
-            <button id="clearButton" class="ghost" type="button">Clear</button>
-          </div>
-          <div class="stats">
-            <div>
-              <strong id="recordingCount">0</strong>
-              <span>recordings</span>
+            <div id="remoteFiles" class="remote-list" aria-live="polite"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Protocol Lab</h2>
             </div>
-            <div>
-              <strong id="transcribedCount">0</strong>
-              <span>transcribed</span>
+            <div class="field-row">
+              <input id="customHexInput" type="text" inputmode="text" spellcheck="false" placeholder="Hex bytes, e.g. 12 00 01">
+              <button id="sendHexButton" type="button">Send</button>
             </div>
-            <div>
-              <strong id="summarizedCount">0</strong>
-              <span>summarized</span>
+            <div class="field-row">
+              <input id="customTextInput" type="text" spellcheck="false" placeholder="Text command">
+              <button id="sendTextButton" type="button">Send</button>
             </div>
-          </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-heading">
+              <h2>Log</h2>
+              <button id="clearLogButton" class="small-button" type="button">Clear</button>
+            </div>
+            <pre id="logOutput" aria-live="polite"></pre>
+          </section>
         </aside>
-      </section>
 
-      <section class="library-section">
-        <div class="section-heading">
-          <h2>Recordings</h2>
-          <div class="button-row compact">
-            <button id="transcribeAllButton" type="button">Transcribe All</button>
-            <button id="summarizeAllButton" type="button">Summarize All</button>
-          </div>
-        </div>
-        <div class="recordings-list" id="recordingsList"></div>
+        <section class="content-stack">
+          <section class="panel recordings-panel">
+            <div class="panel-heading">
+              <h2>Saved Recordings</h2>
+              <span id="recordingCount" class="pill subtle">0 saved</span>
+            </div>
+            <div id="recordingList" class="recording-list" aria-live="polite"></div>
+          </section>
+
+          <section id="detailPane" class="panel detail-panel">
+            <div class="empty-state">
+              <img src="./icons/robot.svg" alt="">
+              <h2>Select a recording</h2>
+              <p>Saved audio, transcripts, and summaries stay in this browser.</p>
+            </div>
+          </section>
+        </section>
       </section>
     </main>
 
-    <dialog id="settingsDialog">
-      <form method="dialog" class="settings-form" id="settingsForm">
-        <div class="dialog-heading">
+    <dialog id="settingsDialog" class="modal">
+      <form id="settingsForm" method="dialog">
+        <div class="modal-heading">
           <div>
-            <p class="eyebrow">Required first</p>
-            <h2>AI connection settings</h2>
+            <h2>OpenAI Settings</h2>
+            <p>Stored locally in this browser for the next visit.</p>
           </div>
-          <button class="icon-button" value="cancel" type="submit" aria-label="Close settings" title="Close">×</button>
+          <button id="closeSettingsButton" class="icon-button" type="button" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+          </button>
         </div>
-        <p class="body-copy">
-          These values are saved in this browser's localStorage. Because this site has no backend, API requests are made directly from the browser.
-        </p>
+
         <label>
           <span>Base URL</span>
-          <input id="baseUrlInput" name="baseUrl" type="url" placeholder="https://api.openai.com/v1" required>
+          <input id="baseUrlInput" name="baseUrl" type="url" required placeholder="https://api.openai.com/v1">
         </label>
         <label>
           <span>API key</span>
-          <input id="apiKeyInput" name="apiKey" type="password" autocomplete="off" placeholder="sk-..." required>
+          <input id="apiKeyInput" name="apiKey" type="password" required autocomplete="off" placeholder="sk-...">
         </label>
+        <div class="split-fields">
+          <label>
+            <span>Transcription model</span>
+            <input id="transcriptionModelInput" name="transcriptionModel" required placeholder="gpt-4o-transcribe-diarize">
+          </label>
+          <label>
+            <span>Summary model</span>
+            <input id="summaryModelInput" name="summaryModel" required placeholder="gpt-5.5">
+          </label>
+        </div>
         <label>
-          <span>Transcription model</span>
-          <input id="transcribeModelInput" name="transcribeModel" type="text" placeholder="gpt-4o-transcribe-diarize" required>
+          <span>Contact list for summaries</span>
+          <textarea id="contactListInput" name="contactList" rows="7" spellcheck="false"></textarea>
         </label>
-        <label>
-          <span>Summary model</span>
-          <input id="summaryModelInput" name="summaryModel" type="text" placeholder="gpt-4.1" required>
-        </label>
-        <label>
-          <span>Contact list</span>
-          <textarea id="contactsInput" name="contacts" rows="5" placeholder="[Contact Name 1] - [Title/Role]"></textarea>
-        </label>
-        <menu>
-          <button value="cancel" type="submit" class="ghost">Cancel</button>
-          <button id="saveSettingsButton" value="default" type="submit" class="accent">Save Settings</button>
+
+        <menu class="modal-actions">
+          <button id="resetSettingsButton" class="ghost-button" type="button">Reset</button>
+          <button class="primary-action" type="submit">Save Settings</button>
         </menu>
       </form>
     </dialog>
 
-    <dialog id="hotspotDialog">
-      <form method="dialog" class="hotspot-form">
-        <div class="dialog-heading">
+    <dialog id="wifiDialog" class="modal small-modal">
+      <form method="dialog">
+        <div class="modal-heading">
           <div>
-            <p class="eyebrow">Recorder hotspot found</p>
-            <h2>Connect to this WiFi</h2>
+            <h2>Connect Recorder Wi-Fi</h2>
+            <p id="wifiDialogText">Switch Wi-Fi, then come back here.</p>
           </div>
-          <button class="icon-button" value="close" type="submit" aria-label="Close hotspot details" title="Close">×</button>
         </div>
-        <div class="hotspot-card">
-          <span>WiFi name</span>
-          <strong id="hotspotDialogSsid"></strong>
+        <div class="ssid-box">
+          <span>SSID</span>
+          <strong id="wifiDialogSsid">Unknown</strong>
         </div>
-        <div class="hotspot-card" id="hotspotPasswordRow" hidden>
-          <span>Password</span>
-          <strong id="hotspotDialogPassword"></strong>
-        </div>
-        <p class="body-copy">
-          Switch your computer or phone to this WiFi network in system settings, then come back here and click <strong>I am connected</strong>.
-        </p>
-        <menu>
-          <button value="close" type="submit" class="accent">Got it</button>
+        <menu class="modal-actions">
+          <button value="cancel" type="submit">Cancel</button>
+          <button id="confirmWifiButton" class="primary-action" value="ready" type="submit">I Am Connected</button>
         </menu>
       </form>
     </dialog>
 
-    <template id="recordingTemplate">
-      <article class="recording-card">
-        <div class="recording-main">
-          <div>
-            <h3></h3>
-            <p class="meta"></p>
-          </div>
-          <audio controls></audio>
-        </div>
-        <div class="recording-actions">
-          <button class="transcribe-button" type="button">Transcribe</button>
-          <button class="summarize-button" type="button">Summarize it</button>
-          <button class="download-file-button ghost" type="button">Save Audio</button>
-        </div>
-        <details class="transcript-block">
-          <summary>Transcript</summary>
-          <pre></pre>
-        </details>
-        <details class="summary-block">
-          <summary>Summary</summary>
-          <pre></pre>
-        </details>
-      </article>
-    </template>
-
-    <script src="app.js"></script>
+    <script src="./app.js" type="module"></script>
   </body>
 </html>

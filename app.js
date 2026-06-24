@@ -1,60 +1,1163 @@
-const SETTINGS_KEY = "sonicapp.aiSettings.v1";
-const HOTSPOT_KEY = "sonicapp.hotspot.v1";
-const DB_NAME = "sonicapp-recordings";
+const SETTINGS_KEY = "sonicloud.settings.v2";
+const HOTSPOT_KEY = "sonicloud.hotspot.v1";
+const DB_NAME = "sonicloud-web";
 const DB_VERSION = 1;
-const DEVICE_BASE_URL = "http://192.168.1.1";
-const DEVICE_WS_URL = "ws://192.168.1.1:27689";
-const APP_CACHE_NAME = "sonicapp-pwa-v3";
-const RECORDER_BLE_SERVICE = "0000ae20-0000-1000-8000-00805f9b34fb";
-const RECORDER_BLE_CHARACTERISTICS = [
+const RECORDING_STORE = "recordings";
+const OPENAI_AUDIO_LIMIT = 25 * 1024 * 1024;
+
+const BLE_SERVICE = "0000ae20-0000-1000-8000-00805f9b34fb";
+const BLE_CHARACTERISTICS = [
   "0000ae21-0000-1000-8000-00805f9b34fb",
   "0000ae22-0000-1000-8000-00805f9b34fb",
   "0000ae23-0000-1000-8000-00805f9b34fb",
   "0000ae24-0000-1000-8000-00805f9b34fb"
 ];
-const AUDIO_EXTENSIONS = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm"];
-const RECORDING_ENDPOINTS = [
-  "/api/recordings",
-  "/api/files",
-  "/api/audio",
-  "/recordings",
-  "/files",
-  "/list",
-  "/"
-];
-const RECORDING_WS_COMMANDS = [
-  { cmd: "4" },
-  { cmd: "3" },
-  { cmd: "2" },
-  { cmd: "1" },
-  { cmd: "getRecordFileList" }
-];
-const BLE_TEXT_DECODER = new TextDecoder();
-const BLE_TEXT_ENCODER = new TextEncoder();
-const BLE_WIFI_PROBE_COMMANDS = [
-  { cmd: "connectDeviceWiFi" },
-  { cmd: "getDeviceWiFiState" },
-  { cmd: "getWiFiHotspotState" },
-  { cmd: "12" },
-  { cmd: "11" },
-  { cmd: "10" },
-  "connectDeviceWiFi",
-  "getDeviceWiFiState",
-  "getWiFiHotspotState"
-];
 
-const SUMMARY_SYSTEM_PROMPT = `## System Role & Objective
+const DEFAULT_SETTINGS = {
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  transcriptionModel: "gpt-4o-transcribe-diarize",
+  summaryModel: "gpt-5.5",
+  contactList: [
+    "* [Contact Name 1] - [Title/Role, e.g., Software Engineer]",
+    "* [Contact Name 2] - [Title/Role, e.g., Project Manager]",
+    "* [Contact Name 3] - [Title/Role, e.g., Mentor / Collaborator]",
+    "* [Contact Name 4] - [Title/Role, e.g., Client / Stakeholder]"
+  ].join("\n")
+};
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+const state = {
+  db: null,
+  settings: { ...DEFAULT_SETTINGS },
+  recordings: [],
+  selectedId: null,
+  remoteFiles: [],
+  hotspotName: localStorage.getItem(HOTSPOT_KEY) || "",
+  forceSettings: false,
+  ble: {
+    device: null,
+    server: null,
+    service: null,
+    characteristics: new Map(),
+    writable: []
+  },
+  socket: null,
+  socketUrl: "",
+  currentDownload: null,
+  logs: []
+};
+
+const els = {};
+
+document.addEventListener("DOMContentLoaded", init);
+
+async function init() {
+  cacheElements();
+  bindEvents();
+  state.db = await openDatabase();
+  state.settings = loadSettings();
+  fillSettingsForm();
+  await refreshRecordings();
+  await registerServiceWorker();
+  updateNetworkBadge();
+  updateDevicePanel();
+  renderRemoteFiles();
+  renderRecordings();
+
+  if (!settingsComplete()) {
+    openSettings(true);
+  }
+}
+
+function cacheElements() {
+  Object.assign(els, {
+    offlineBadge: document.querySelector("#offlineBadge"),
+    settingsButton: document.querySelector("#settingsButton"),
+    settingsDialog: document.querySelector("#settingsDialog"),
+    settingsForm: document.querySelector("#settingsForm"),
+    closeSettingsButton: document.querySelector("#closeSettingsButton"),
+    resetSettingsButton: document.querySelector("#resetSettingsButton"),
+    baseUrlInput: document.querySelector("#baseUrlInput"),
+    apiKeyInput: document.querySelector("#apiKeyInput"),
+    transcriptionModelInput: document.querySelector("#transcriptionModelInput"),
+    summaryModelInput: document.querySelector("#summaryModelInput"),
+    contactListInput: document.querySelector("#contactListInput"),
+    connectBleButton: document.querySelector("#connectBleButton"),
+    findHotspotButton: document.querySelector("#findHotspotButton"),
+    wifiReadyButton: document.querySelector("#wifiReadyButton"),
+    downloadAllButton: document.querySelector("#downloadAllButton"),
+    fileImportInput: document.querySelector("#fileImportInput"),
+    bleBadge: document.querySelector("#bleBadge"),
+    bleStatus: document.querySelector("#bleStatus"),
+    bleCharSelect: document.querySelector("#bleCharSelect"),
+    hotspotName: document.querySelector("#hotspotName"),
+    socketStatus: document.querySelector("#socketStatus"),
+    remoteCount: document.querySelector("#remoteCount"),
+    remoteFiles: document.querySelector("#remoteFiles"),
+    customHexInput: document.querySelector("#customHexInput"),
+    sendHexButton: document.querySelector("#sendHexButton"),
+    customTextInput: document.querySelector("#customTextInput"),
+    sendTextButton: document.querySelector("#sendTextButton"),
+    clearLogButton: document.querySelector("#clearLogButton"),
+    logOutput: document.querySelector("#logOutput"),
+    recordingCount: document.querySelector("#recordingCount"),
+    recordingList: document.querySelector("#recordingList"),
+    detailPane: document.querySelector("#detailPane"),
+    wifiDialog: document.querySelector("#wifiDialog"),
+    wifiDialogText: document.querySelector("#wifiDialogText"),
+    wifiDialogSsid: document.querySelector("#wifiDialogSsid"),
+    confirmWifiButton: document.querySelector("#confirmWifiButton")
+  });
+}
+
+function bindEvents() {
+  els.settingsButton.addEventListener("click", () => openSettings(false));
+  els.closeSettingsButton.addEventListener("click", closeSettings);
+  els.resetSettingsButton.addEventListener("click", resetSettingsForm);
+  els.settingsForm.addEventListener("submit", saveSettings);
+  els.connectBleButton.addEventListener("click", connectBle);
+  els.findHotspotButton.addEventListener("click", findHotspot);
+  els.wifiReadyButton.addEventListener("click", confirmWifiReady);
+  els.downloadAllButton.addEventListener("click", downloadAllNew);
+  els.fileImportInput.addEventListener("change", importAudioFiles);
+  els.sendHexButton.addEventListener("click", sendCustomHex);
+  els.sendTextButton.addEventListener("click", sendCustomText);
+  els.clearLogButton.addEventListener("click", () => {
+    state.logs = [];
+    renderLog();
+  });
+  els.wifiDialog.addEventListener("close", () => {
+    if (els.wifiDialog.returnValue === "ready") {
+      connectWifiSocket();
+    }
+  });
+  window.addEventListener("online", updateNetworkBadge);
+  window.addEventListener("offline", updateNetworkBadge);
+}
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    setNetworkBadge("Offline cache unsupported");
+    return;
+  }
+
+  try {
+    await navigator.serviceWorker.register("./service-worker.js");
+    setNetworkBadge(navigator.onLine ? "Offline-ready" : "Offline");
+  } catch (error) {
+    setNetworkBadge("Cache failed");
+    logLine(`Service worker failed: ${error.message}`, "warn");
+  }
+}
+
+function updateNetworkBadge() {
+  setNetworkBadge(navigator.onLine ? "Offline-ready" : "Offline");
+}
+
+function setNetworkBadge(text) {
+  els.offlineBadge.textContent = text;
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function fillSettingsForm() {
+  els.baseUrlInput.value = state.settings.baseUrl || DEFAULT_SETTINGS.baseUrl;
+  els.apiKeyInput.value = state.settings.apiKey || "";
+  els.transcriptionModelInput.value = state.settings.transcriptionModel || DEFAULT_SETTINGS.transcriptionModel;
+  els.summaryModelInput.value = state.settings.summaryModel || DEFAULT_SETTINGS.summaryModel;
+  els.contactListInput.value = state.settings.contactList || DEFAULT_SETTINGS.contactList;
+}
+
+function openSettings(force) {
+  state.forceSettings = force;
+  els.closeSettingsButton.disabled = force && !settingsComplete();
+  fillSettingsForm();
+  if (!els.settingsDialog.open) {
+    els.settingsDialog.showModal();
+  }
+}
+
+function closeSettings() {
+  if (state.forceSettings && !settingsComplete()) {
+    logLine("Save OpenAI settings before continuing.", "warn");
+    return;
+  }
+  els.settingsDialog.close();
+}
+
+function resetSettingsForm() {
+  localStorage.removeItem(SETTINGS_KEY);
+  state.settings = { ...DEFAULT_SETTINGS };
+  state.forceSettings = true;
+  fillSettingsForm();
+  els.closeSettingsButton.disabled = true;
+  logLine("OpenAI settings cleared.");
+}
+
+function saveSettings(event) {
+  event.preventDefault();
+  const next = {
+    baseUrl: normalizeBaseUrl(els.baseUrlInput.value),
+    apiKey: els.apiKeyInput.value.trim(),
+    transcriptionModel: els.transcriptionModelInput.value.trim(),
+    summaryModel: els.summaryModelInput.value.trim(),
+    contactList: els.contactListInput.value.trim() || DEFAULT_SETTINGS.contactList
+  };
+
+  if (!next.baseUrl || !next.apiKey || !next.transcriptionModel || !next.summaryModel) {
+    logLine("Missing endpoint, key, transcription model, or summary model.", "warn");
+    return;
+  }
+
+  state.settings = next;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  state.forceSettings = false;
+  els.closeSettingsButton.disabled = false;
+  els.settingsDialog.close();
+  logLine("OpenAI settings saved.");
+}
+
+function settingsComplete() {
+  return Boolean(
+    state.settings.baseUrl &&
+    state.settings.apiKey &&
+    state.settings.transcriptionModel &&
+    state.settings.summaryModel
+  );
+}
+
+function normalizeBaseUrl(value) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RECORDING_STORE)) {
+        const store = db.createObjectStore(RECORDING_STORE, { keyPath: "id" });
+        store.createIndex("downloadedAt", "downloadedAt");
+        store.createIndex("name", "name");
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getStore(mode = "readonly") {
+  return state.db.transaction(RECORDING_STORE, mode).objectStore(RECORDING_STORE);
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function refreshRecordings() {
+  state.recordings = await requestToPromise(getStore().getAll());
+  state.recordings.sort((a, b) => String(b.downloadedAt || "").localeCompare(String(a.downloadedAt || "")));
+}
+
+async function saveRecording(recording) {
+  await requestToPromise(getStore("readwrite").put(recording));
+  await refreshRecordings();
+  renderRecordings();
+  if (state.selectedId === recording.id) {
+    renderSelectedRecording();
+  }
+}
+
+async function getRecording(id) {
+  return requestToPromise(getStore().get(id));
+}
+
+async function deleteRecording(id) {
+  await requestToPromise(getStore("readwrite").delete(id));
+  if (state.selectedId === id) state.selectedId = null;
+  await refreshRecordings();
+  renderRecordings();
+  renderSelectedRecording();
+}
+
+async function importAudioFiles(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = "";
+  for (const file of files) {
+    const recording = await buildRecordingFromBlob(file, {
+      name: file.name,
+      source: "manual import",
+      time: file.lastModified ? new Date(file.lastModified).toISOString() : new Date().toISOString(),
+      metadata: { imported: true, lastModified: file.lastModified || null }
+    });
+    await saveRecording(recording);
+    logLine(`Imported ${file.name}.`);
+  }
+}
+
+async function buildRecordingFromBlob(blob, info) {
+  const hash = await sha256(blob);
+  const name = info.name || `recording-${Date.now()}.wav`;
+  const id = `${slugify(name)}-${blob.size}-${hash.slice(0, 16)}`;
+  return {
+    id,
+    name,
+    size: blob.size,
+    time: info.time || new Date().toISOString(),
+    source: info.source || "recorder",
+    downloadedAt: new Date().toISOString(),
+    metadata: info.metadata || {},
+    mime: blob.type || guessMime(name),
+    blob,
+    sha256: hash,
+    transcribed: false,
+    summarized: false,
+    transcriptText: "",
+    transcriptSegments: [],
+    transcriptRaw: null,
+    summaryText: "",
+    summaryAt: "",
+    status: "saved"
+  };
+}
+
+async function sha256(blob) {
+  const buffer = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function renderRecordings() {
+  els.recordingCount.textContent = `${state.recordings.length} saved`;
+
+  if (!state.recordings.length) {
+    els.recordingList.innerHTML = `<div class="empty-copy">No saved recordings yet.</div>`;
+    return;
+  }
+
+  els.recordingList.innerHTML = state.recordings.map((recording) => `
+    <button class="recording-item" type="button" data-id="${escapeAttr(recording.id)}" aria-current="${recording.id === state.selectedId}">
+      <span>
+        <span class="item-title">${escapeHtml(recording.name)}</span>
+        <span class="item-meta">
+          <span>${formatBytes(recording.size)}</span>
+          <span>${escapeHtml(formatDate(recording.time || recording.downloadedAt))}</span>
+          <span>${escapeHtml(recording.source || "recorder")}</span>
+        </span>
+      </span>
+      <span class="item-flags">
+        ${recording.transcribed ? `<span class="flag done">Transcribed</span>` : `<span class="flag">Audio</span>`}
+        ${recording.summarized ? `<span class="flag done">Summary</span>` : ""}
+      </span>
+    </button>
+  `).join("");
+
+  els.recordingList.querySelectorAll("[data-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedId = button.dataset.id;
+      renderRecordings();
+      renderSelectedRecording();
+    });
+  });
+}
+
+async function renderSelectedRecording() {
+  if (!state.selectedId) {
+    els.detailPane.innerHTML = `
+      <div class="empty-state">
+        <img src="./icons/robot.svg" alt="">
+        <h2>Select a recording</h2>
+        <p>Saved audio, transcripts, and summaries stay in this browser.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const recording = await getRecording(state.selectedId);
+  if (!recording) return;
+  const audioUrl = recording.blob ? URL.createObjectURL(recording.blob) : "";
+  const canTranscribe = Boolean(recording.blob);
+  const canSummarize = Boolean(recording.transcriptText);
+
+  els.detailPane.innerHTML = `
+    <div class="detail-grid">
+      <div class="detail-main">
+        <div class="detail-title">
+          <h2>${escapeHtml(recording.name)}</h2>
+          <p>${escapeHtml(recording.source || "recorder")} - ${formatBytes(recording.size)} - ${escapeHtml(formatDate(recording.time || recording.downloadedAt))}</p>
+        </div>
+        ${audioUrl ? `<audio controls src="${audioUrl}"></audio>` : ""}
+        <div class="detail-actions">
+          <button id="transcribeButton" class="primary-action" type="button" ${canTranscribe ? "" : "disabled"}>Transcribe</button>
+          <button id="summarizeButton" type="button" ${canSummarize ? "" : "disabled"}>Summarize</button>
+          <button id="exportButton" type="button">Export JSON</button>
+          <button id="deleteButton" type="button">Delete</button>
+        </div>
+        <section>
+          <div class="panel-heading"><h3>Transcript</h3></div>
+          <div class="text-output">${escapeHtml(formatTranscript(recording) || "No transcript yet.")}</div>
+        </section>
+      </div>
+      <div class="detail-side">
+        <section>
+          <div class="panel-heading"><h3>Summary</h3></div>
+          <div class="text-output summary-output">${recording.summaryText ? markdownToHtml(recording.summaryText) : "No summary yet."}</div>
+        </section>
+        <section>
+          <div class="panel-heading"><h3>Metadata</h3></div>
+          <pre class="text-output">${escapeHtml(JSON.stringify(stripBlob(recording), null, 2))}</pre>
+        </section>
+      </div>
+    </div>
+  `;
+
+  els.detailPane.querySelector("#transcribeButton").addEventListener("click", () => transcribeSelected(recording.id));
+  els.detailPane.querySelector("#summarizeButton").addEventListener("click", () => summarizeSelected(recording.id));
+  els.detailPane.querySelector("#deleteButton").addEventListener("click", () => deleteRecording(recording.id));
+  els.detailPane.querySelector("#exportButton").addEventListener("click", () => exportRecording(recording.id));
+}
+
+async function exportRecording(id) {
+  const recording = await getRecording(id);
+  const exportable = stripBlob(recording);
+  const blob = new Blob([JSON.stringify(exportable, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${slugify(recording.name)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function stripBlob(recording) {
+  const { blob, ...rest } = recording;
+  return rest;
+}
+
+function formatTranscript(recording) {
+  if (Array.isArray(recording.transcriptSegments) && recording.transcriptSegments.length) {
+    return recording.transcriptSegments
+      .map((segment) => `${segment.speaker || "Speaker"}: ${segment.text || ""}`.trim())
+      .join("\n\n");
+  }
+  return recording.transcriptText || "";
+}
+
+async function connectBle() {
+  if (!navigator.bluetooth) {
+    logLine("Web Bluetooth is not available in this browser. Use Chrome or Edge on desktop/Android.", "warn");
+    setBleState("bad", "Unsupported");
+    return;
+  }
+
+  try {
+    setBleState("warn", "Selecting");
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [
+        { namePrefix: "CB08" },
+        { services: [BLE_SERVICE] }
+      ],
+      optionalServices: [BLE_SERVICE]
+    });
+
+    state.ble.device = device;
+    device.addEventListener("gattserverdisconnected", onBleDisconnected);
+    logLine(`Selected BLE device: ${device.name || device.id}`);
+
+    setBleState("warn", "Connecting");
+    state.ble.server = await device.gatt.connect();
+    state.ble.service = await state.ble.server.getPrimaryService(BLE_SERVICE);
+    state.ble.characteristics.clear();
+    state.ble.writable = [];
+
+    for (const uuid of BLE_CHARACTERISTICS) {
+      try {
+        const characteristic = await state.ble.service.getCharacteristic(uuid);
+        state.ble.characteristics.set(shortUuid(uuid), characteristic);
+        if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
+          state.ble.writable.push(characteristic);
+        }
+        if (characteristic.properties.notify || characteristic.properties.indicate) {
+          await characteristic.startNotifications();
+          characteristic.addEventListener("characteristicvaluechanged", (event) => {
+            const bytes = new Uint8Array(event.target.value.buffer.slice(0));
+            handleIncoming(bytes, `BLE ${shortUuid(uuid)}`);
+          });
+        }
+        logLine(`BLE ${shortUuid(uuid)} ready: ${describeProperties(characteristic.properties)}`);
+      } catch (error) {
+        logLine(`BLE ${shortUuid(uuid)} unavailable: ${error.message}`, "warn");
+      }
+    }
+
+    setBleState("ok", "Connected");
+    updateDevicePanel();
+    await sendBleProbe("enableWifi");
+    await sleep(300);
+    await sendBleProbe("wifi");
+  } catch (error) {
+    setBleState("bad", "Failed");
+    logLine(`BLE connection failed: ${error.message}`, "error");
+  }
+}
+
+function onBleDisconnected() {
+  setBleState("bad", "Disconnected");
+  state.ble.server = null;
+  state.ble.service = null;
+  state.ble.characteristics.clear();
+  state.ble.writable = [];
+  updateDevicePanel();
+  logLine("BLE device disconnected.", "warn");
+}
+
+function setBleState(stateName, label) {
+  els.bleBadge.dataset.state = stateName;
+  els.bleBadge.textContent = label;
+  els.bleStatus.textContent = label;
+}
+
+function updateDevicePanel() {
+  const name = state.ble.device?.name || state.ble.device?.id || "Not connected";
+  els.bleStatus.textContent = state.ble.server?.connected ? name : "Not connected";
+  els.hotspotName.textContent = state.hotspotName || "Unknown";
+  els.socketStatus.textContent = state.socket?.readyState === WebSocket.OPEN ? `Open ${state.socketUrl}` : "Closed";
+
+  const selected = els.bleCharSelect.value;
+  const options = [`<option value="auto">Auto writable</option>`].concat(
+    state.ble.writable.map((char) => `<option value="${shortUuid(char.uuid)}">${shortUuid(char.uuid)}</option>`)
+  );
+  els.bleCharSelect.innerHTML = options.join("");
+  if ([...els.bleCharSelect.options].some((option) => option.value === selected)) {
+    els.bleCharSelect.value = selected;
+  }
+}
+
+async function findHotspot() {
+  if (state.hotspotName) {
+    openWifiDialog(state.hotspotName);
+    return;
+  }
+
+  if (!state.ble.server?.connected) {
+    await connectBle();
+  }
+  if (!state.ble.server?.connected) return;
+
+  logLine("Sending fast-transfer and Wi-Fi state probes over BLE.");
+  await sendBleProbe("enableWifi");
+  await sleep(300);
+  await sendBleProbe("wifi");
+  window.setTimeout(() => {
+    if (state.hotspotName) openWifiDialog(state.hotspotName);
+    else logLine("No Wi-Fi name seen yet. Watch BLE notifications or enter a known SSID in the lab.", "warn");
+  }, 1400);
+}
+
+async function confirmWifiReady() {
+  if (state.hotspotName) {
+    openWifiDialog(state.hotspotName);
+  } else {
+    openWifiDialog("Recorder hotspot");
+  }
+}
+
+function openWifiDialog(ssid) {
+  els.wifiDialogSsid.textContent = ssid;
+  els.wifiDialogText.textContent = "Switch your computer or phone to this recorder hotspot, then return here.";
+  if (!els.wifiDialog.open) els.wifiDialog.showModal();
+}
+
+async function sendBleProbe(kind) {
+  const probes = {
+    wifi: [
+      { label: "method getDeviceWiFiState", bytes: encodeText("getDeviceWiFiState") },
+      { label: "json cmd 12", bytes: encodeText(JSON.stringify({ cmd: "12" })) },
+      { label: "json method getDeviceWiFiState", bytes: encodeText(JSON.stringify({ cmd: "getDeviceWiFiState" })) },
+      { label: "byte 0x12", bytes: new Uint8Array([0x12]) }
+    ],
+    enableWifi: [
+      { label: "method connectDeviceWiFi", bytes: encodeText("connectDeviceWiFi") },
+      { label: "json method connectDeviceWiFi", bytes: encodeText(JSON.stringify({ cmd: "connectDeviceWiFi" })) },
+      { label: "json cmd 13", bytes: encodeText(JSON.stringify({ cmd: "13" })) }
+    ],
+    files: [
+      { label: "method getRecordFileList", bytes: encodeText("getRecordFileList") },
+      { label: "json method getRecordFileList", bytes: encodeText(JSON.stringify({ cmd: "getRecordFileList" })) },
+      { label: "json cmd 4", bytes: encodeText(JSON.stringify({ cmd: "4" })) }
+    ]
+  };
+
+  for (const probe of probes[kind] || []) {
+    await sendBleBytes(probe.bytes, probe.label);
+    await sleep(220);
+  }
+}
+
+async function sendBleBytes(bytes, label = "custom") {
+  if (!state.ble.writable.length) {
+    logLine("No writable BLE characteristic is available.", "warn");
+    return;
+  }
+
+  const selected = els.bleCharSelect.value;
+  const targets = selected && selected !== "auto"
+    ? state.ble.writable.filter((char) => shortUuid(char.uuid) === selected)
+    : [state.ble.writable[0]];
+
+  for (const characteristic of targets) {
+    if (characteristic.properties.writeWithoutResponse && characteristic.writeValueWithoutResponse) {
+      await characteristic.writeValueWithoutResponse(bytes);
+    } else {
+      await characteristic.writeValue(bytes);
+    }
+    logLine(`BLE -> ${shortUuid(characteristic.uuid)} ${label}: ${hexPreview(bytes)}`);
+  }
+}
+
+function sendCustomHex() {
+  const raw = els.customHexInput.value.trim();
+  if (!raw) return;
+  try {
+    const bytes = parseHex(raw);
+    sendBleBytes(bytes, "custom hex");
+  } catch (error) {
+    logLine(error.message, "warn");
+  }
+}
+
+function sendCustomText() {
+  const raw = els.customTextInput.value;
+  if (!raw) return;
+  sendBleBytes(encodeText(raw), "custom text");
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    state.socket.send(raw);
+    logLine(`WS -> text: ${raw}`);
+  }
+}
+
+async function connectWifiSocket() {
+  closeSocket();
+  const endpoints = ["ws://192.168.1.1:27689", "wss://192.168.1.1:27689"];
+
+  for (const endpoint of endpoints) {
+    try {
+      logLine(`Opening ${endpoint}`);
+      await openSocket(endpoint);
+      state.socketUrl = endpoint;
+      updateDevicePanel();
+      requestFileList();
+      return;
+    } catch (error) {
+      logLine(`${endpoint} failed: ${error.message}`, "warn");
+    }
+  }
+
+  updateDevicePanel();
+  logLine("Could not open recorder WebSocket. On HTTPS GitHub Pages, the browser may block ws:// local-device traffic.", "error");
+}
+
+function openSocket(endpoint) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const socket = new WebSocket(endpoint);
+    socket.binaryType = "arraybuffer";
+    const timeout = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        socket.close();
+        reject(new Error("timeout"));
+      }
+    }, 4500);
+
+    socket.addEventListener("open", () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      state.socket = socket;
+      logLine(`WebSocket open: ${endpoint}`);
+      resolve(socket);
+    });
+
+    socket.addEventListener("message", (event) => handleIncoming(event.data, "WS"));
+    socket.addEventListener("close", () => {
+      if (state.socket === socket) {
+        state.socket = null;
+        updateDevicePanel();
+      }
+      logLine(`WebSocket closed: ${endpoint}`, "warn");
+    });
+    socket.addEventListener("error", () => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timeout);
+        reject(new Error("socket error"));
+      }
+    });
+  });
+}
+
+function closeSocket() {
+  if (state.socket) {
+    state.socket.close();
+    state.socket = null;
+  }
+  state.socketUrl = "";
+  updateDevicePanel();
+}
+
+function requestFileList() {
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    const messages = [
+      { cmd: "getRecordFileList" },
+      { cmd: "4" },
+      { action: "getRecordFileList" },
+      "getRecordFileList"
+    ];
+    for (const message of messages) {
+      sendSocketMessage(message);
+    }
+  }
+  if (state.ble.server?.connected) {
+    sendBleProbe("files");
+  }
+}
+
+function sendSocketMessage(message) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+  const payload = typeof message === "string" ? message : JSON.stringify(message);
+  state.socket.send(payload);
+  logLine(`WS -> ${payload}`);
+}
+
+async function downloadAllNew() {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    await connectWifiSocket();
+  } else {
+    requestFileList();
+  }
+
+  await sleep(1200);
+  if (!state.remoteFiles.length) {
+    logLine("No recorder file list has been decoded yet.", "warn");
+    return;
+  }
+
+  for (const file of state.remoteFiles) {
+    const exists = state.recordings.some((recording) => {
+      return recording.name === file.name && Number(recording.size || 0) === Number(file.size || 0);
+    });
+    if (exists) {
+      logLine(`Skipping saved file: ${file.name}`);
+      continue;
+    }
+    await downloadRemoteFile(file);
+  }
+}
+
+function downloadRemoteFile(file) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    logLine("Recorder WebSocket is not connected.", "warn");
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const download = {
+      file,
+      chunks: [],
+      received: 0,
+      resolve,
+      idleTimer: null,
+      timeout: null
+    };
+    state.currentDownload = download;
+
+    download.timeout = window.setTimeout(() => {
+      if (state.currentDownload === download) {
+        state.currentDownload = null;
+        logLine(`No file bytes received for ${file.name}.`, "warn");
+        resolve();
+      }
+    }, 20000);
+
+    const messages = [
+      { cmd: "startGetFileByFrom", fileName: file.name, offset: 0, isNew: true },
+      { cmd: "startGetFileByFromToEnd", fileName: file.name, offset: 0, end: file.size || 0, isNew: true },
+      { action: "download", fileName: file.name, offset: 0 },
+      `startGetFileByFrom ${file.name}`
+    ];
+    for (const message of messages) {
+      sendSocketMessage(message);
+    }
+    logLine(`Requested recorder file: ${file.name}`);
+  });
+}
+
+function addDownloadChunk(bytes) {
+  const download = state.currentDownload;
+  if (!download) return false;
+  download.chunks.push(bytes);
+  download.received += bytes.byteLength;
+
+  if (download.idleTimer) window.clearTimeout(download.idleTimer);
+  download.idleTimer = window.setTimeout(() => finishCurrentDownload("idle"), 1400);
+  logLine(`Receiving ${download.file.name}: ${formatBytes(download.received)}`);
+  return true;
+}
+
+async function finishCurrentDownload(reason) {
+  const download = state.currentDownload;
+  if (!download) return;
+  state.currentDownload = null;
+  window.clearTimeout(download.timeout);
+  window.clearTimeout(download.idleTimer);
+
+  if (!download.chunks.length) {
+    download.resolve();
+    return;
+  }
+
+  const blob = new Blob(download.chunks, { type: guessMime(download.file.name) });
+  const recording = await buildRecordingFromBlob(blob, {
+    name: download.file.name,
+    source: "recorder Wi-Fi",
+    time: download.file.time || new Date().toISOString(),
+    metadata: { remoteFile: download.file, finishReason: reason }
+  });
+  await saveRecording(recording);
+  logLine(`Saved ${download.file.name} (${formatBytes(blob.size)}).`);
+  download.resolve();
+}
+
+function handleIncoming(data, source) {
+  if (data instanceof ArrayBuffer) {
+    const bytes = new Uint8Array(data);
+    if (addDownloadChunk(bytes)) return;
+    logLine(`${source} <- binary ${formatBytes(bytes.byteLength)} ${hexPreview(bytes)}`);
+    tryParseIncomingText(textDecoder.decode(bytes), source);
+    return;
+  }
+
+  if (data instanceof Uint8Array) {
+    logLine(`${source} <- ${hexPreview(data)} ${printablePreview(data)}`);
+    tryParseIncomingText(textDecoder.decode(data), source);
+    return;
+  }
+
+  if (typeof data === "string") {
+    logLine(`${source} <- ${data.slice(0, 500)}`);
+    tryParseIncomingText(data, source);
+  }
+}
+
+function tryParseIncomingText(text, source) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  const ssid = extractSsid(trimmed);
+  if (ssid) setHotspotName(ssid);
+
+  const parsed = parseJsonLoose(trimmed);
+  if (parsed) {
+    handleRecorderMessage(parsed, source);
+  }
+}
+
+function handleRecorderMessage(message, source) {
+  if (Array.isArray(message)) {
+    absorbRemoteFiles(message, source);
+    return;
+  }
+
+  const data = message.data ?? message.result ?? message.payload ?? null;
+  if (data && typeof data === "object") {
+    if (typeof data.wifiName === "string" && data.wifiName.trim()) {
+      setHotspotName(data.wifiName.trim());
+      openWifiDialog(data.wifiName.trim());
+    }
+
+    if (Array.isArray(data)) {
+      absorbRemoteFiles(data, source);
+    } else if (Array.isArray(data.files) || Array.isArray(data.records) || Array.isArray(data.recordings)) {
+      absorbRemoteFiles(data.files || data.records || data.recordings, source);
+    }
+
+    const base64 = data.fileData || data.audio || data.chunk || data.base64;
+    if (typeof base64 === "string" && state.currentDownload) {
+      addDownloadChunk(base64ToBytes(base64));
+    }
+
+    const progress = Number(data.progress);
+    if (state.currentDownload && Number.isFinite(progress) && progress >= 100) {
+      finishCurrentDownload("progress");
+    }
+  }
+
+  if (Array.isArray(message.files) || Array.isArray(message.records) || Array.isArray(message.recordings)) {
+    absorbRemoteFiles(message.files || message.records || message.recordings, source);
+  }
+}
+
+function absorbRemoteFiles(items, source) {
+  const normalized = items.map(normalizeRemoteFile).filter(Boolean);
+  if (!normalized.length) return;
+
+  const map = new Map(state.remoteFiles.map((file) => [remoteFileKey(file), file]));
+  for (const file of normalized) map.set(remoteFileKey(file), file);
+  state.remoteFiles = Array.from(map.values()).sort((a, b) => String(b.time || "").localeCompare(String(a.time || "")));
+  renderRemoteFiles();
+  logLine(`Decoded ${normalized.length} recorder file(s) from ${source}.`);
+}
+
+function normalizeRemoteFile(item) {
+  if (!item || typeof item !== "object") return null;
+  const name = item.name || item.recordName || item.fileName || item.path;
+  if (!name) return null;
+  return {
+    name: String(name),
+    size: Number(item.size || item.fileLength || item.length || item.bytes || 0),
+    time: item.time || item.date || item.createdAt || item.recordTime || "",
+    raw: item
+  };
+}
+
+function renderRemoteFiles() {
+  els.remoteCount.textContent = `${state.remoteFiles.length} found`;
+  if (!state.remoteFiles.length) {
+    els.remoteFiles.innerHTML = `<div class="empty-copy">No recorder list decoded.</div>`;
+    return;
+  }
+
+  els.remoteFiles.innerHTML = state.remoteFiles.map((file) => `
+    <button class="remote-item" type="button" data-name="${escapeAttr(file.name)}">
+      <span>
+        <span class="item-title">${escapeHtml(file.name)}</span>
+        <span class="item-meta">
+          <span>${formatBytes(file.size)}</span>
+          <span>${escapeHtml(formatDate(file.time))}</span>
+        </span>
+      </span>
+      <span class="item-flags"><span class="flag progress">Remote</span></span>
+    </button>
+  `).join("");
+
+  els.remoteFiles.querySelectorAll("[data-name]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const file = state.remoteFiles.find((entry) => entry.name === button.dataset.name);
+      if (file) downloadRemoteFile(file);
+    });
+  });
+}
+
+async function transcribeSelected(id) {
+  if (!settingsComplete()) {
+    openSettings(true);
+    return;
+  }
+
+  const recording = await getRecording(id);
+  if (!recording?.blob) return;
+  if (recording.blob.size > OPENAI_AUDIO_LIMIT) {
+    logLine(`OpenAI file uploads are limited to 25 MB. ${recording.name} is ${formatBytes(recording.blob.size)}.`, "warn");
+    return;
+  }
+
+  try {
+    logLine(`Transcribing ${recording.name} with ${state.settings.transcriptionModel}.`);
+    recording.status = "transcribing";
+    await saveRecording(recording);
+
+    const form = new FormData();
+    const filename = ensureAudioExtension(recording.name, recording.mime);
+    form.append("file", new File([recording.blob], filename, { type: recording.mime || guessMime(filename) }));
+    form.append("model", state.settings.transcriptionModel);
+    form.append("response_format", state.settings.transcriptionModel.includes("diarize") ? "diarized_json" : "json");
+
+    const response = await fetch(apiEndpoint("audio/transcriptions"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${state.settings.apiKey}`
+      },
+      body: form
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    const raw = await response.json();
+    const normalized = normalizeTranscriptResponse(raw);
+    recording.transcribed = true;
+    recording.status = "transcribed";
+    recording.transcriptRaw = raw;
+    recording.transcriptText = normalized.text;
+    recording.transcriptSegments = normalized.segments;
+    await saveRecording(recording);
+    logLine(`Transcribed ${recording.name}.`);
+  } catch (error) {
+    const latest = await getRecording(id);
+    if (latest) {
+      latest.status = "transcription failed";
+      await saveRecording(latest);
+    }
+    logLine(`Transcription failed: ${error.message}`, "error");
+  }
+}
+
+function normalizeTranscriptResponse(raw) {
+  const text = raw.text || raw.transcript || "";
+  const candidateSegments = raw.segments || raw.speaker_segments || raw.diarization || [];
+  const segments = Array.isArray(candidateSegments)
+    ? candidateSegments.map((segment, index) => ({
+      speaker: normalizeSpeaker(segment.speaker || segment.speaker_label || segment.label || segment.channel || `Person ${index + 1}`),
+      text: segment.text || segment.transcript || segment.word || "",
+      start: segment.start ?? segment.start_time ?? null,
+      end: segment.end ?? segment.end_time ?? null
+    })).filter((segment) => segment.text)
+    : [];
+
+  if (segments.length) {
+    return {
+      text: segments.map((segment) => `${segment.speaker}: ${segment.text}`).join("\n\n"),
+      segments
+    };
+  }
+
+  return { text, segments: text ? [{ speaker: "Person 1", text }] : [] };
+}
+
+function normalizeSpeaker(value) {
+  const text = String(value || "").trim();
+  if (!text) return "Person";
+  if (/^speaker[_\s-]?\d+$/i.test(text)) {
+    const number = text.match(/\d+/)?.[0] || "";
+    return `Person ${number}`;
+  }
+  return text;
+}
+
+async function summarizeSelected(id) {
+  if (!settingsComplete()) {
+    openSettings(true);
+    return;
+  }
+
+  const recording = await getRecording(id);
+  if (!recording?.transcriptText) return;
+
+  try {
+    logLine(`Summarizing ${recording.name} with ${state.settings.summaryModel}.`);
+    recording.status = "summarizing";
+    await saveRecording(recording);
+
+    const prompt = buildSummaryPrompt(recording.transcriptText, state.settings.contactList);
+    const summary = await createSummary(prompt);
+    recording.summaryText = summary;
+    recording.summaryAt = new Date().toISOString();
+    recording.summarized = true;
+    recording.status = "summarized";
+    await saveRecording(recording);
+    logLine(`Summary saved for ${recording.name}.`);
+  } catch (error) {
+    const latest = await getRecording(id);
+    if (latest) {
+      latest.status = "summary failed";
+      await saveRecording(latest);
+    }
+    logLine(`Summary failed: ${error.message}`, "error");
+  }
+}
+
+async function createSummary(prompt) {
+  const responsesPayload = {
+    model: state.settings.summaryModel,
+    input: [
+      { role: "system", content: prompt },
+      { role: "user", content: "Generate the structured business summary now." }
+    ]
+  };
+
+  const responses = await fetch(apiEndpoint("responses"), {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(responsesPayload)
+  });
+
+  if (responses.ok) {
+    return extractText(await responses.json());
+  }
+
+  if (![404, 405].includes(responses.status)) {
+    throw new Error(await responses.text());
+  }
+
+  const chat = await fetch(apiEndpoint("chat/completions"), {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({
+      model: state.settings.summaryModel,
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: "Generate the structured business summary now." }
+      ]
+    })
+  });
+
+  if (!chat.ok) throw new Error(await chat.text());
+  return extractText(await chat.json());
+}
+
+function jsonHeaders() {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${state.settings.apiKey}`
+  };
+}
+
+function apiEndpoint(path) {
+  return `${normalizeBaseUrl(state.settings.baseUrl)}/${path.replace(/^\/+/, "")}`;
+}
+
+function extractText(payload) {
+  if (payload.output_text) return payload.output_text;
+  if (payload.choices?.[0]?.message?.content) return payload.choices[0].message.content;
+  if (Array.isArray(payload.output)) {
+    return payload.output.flatMap((item) => {
+      if (Array.isArray(item.content)) {
+        return item.content.map((part) => part.text || part.output_text || "").filter(Boolean);
+      }
+      return item.text || "";
+    }).filter(Boolean).join("\n");
+  }
+  return JSON.stringify(payload, null, 2);
+}
+
+function buildSummaryPrompt(transcriptionText, contactList) {
+  return `## System Role & Objective
 You are an expert executive assistant and business analyst. Your task is to analyze the provided meeting transcription between "Person 1" and "Person 2", mapping their true identities using the provided Contact List where possible, and extract a comprehensive, structured business summary.
 
 ## Contextual Data
 
 ### 1. Business Contact List (Reference)
 The following people are common business contacts. Use this list to infer or explicitly map who "Person 1" and "Person 2" actually are based on context clues, names mentioned, or conversational topics:
-{{CONTACT_LIST}}
+${contactList || DEFAULT_SETTINGS.contactList}
 
 ### 2. Meeting Transcription to Analyze
 """
-{{TRANSCRIPTION_TEXT}}
+${transcriptionText}
 """
 
 ---
@@ -84,1100 +1187,234 @@ Provide a clear breakdown of future work. For every actionable item, extract:
 ### 6. Risks, Blockers, & Open Questions
 *   Any dependencies, technological blockers, or potential risks mentioned that could delay next steps.
 *   List any unresolved questions that require a follow-up meeting or external clarification.`;
+}
 
-const elements = {
-  settingsButton: document.querySelector("#settingsButton"),
-  installButton: document.querySelector("#installButton"),
-  offlineBadge: document.querySelector("#offlineBadge"),
-  settingsDialog: document.querySelector("#settingsDialog"),
-  settingsForm: document.querySelector("#settingsForm"),
-  hotspotDialog: document.querySelector("#hotspotDialog"),
-  hotspotDialogSsid: document.querySelector("#hotspotDialogSsid"),
-  hotspotDialogPassword: document.querySelector("#hotspotDialogPassword"),
-  hotspotPasswordRow: document.querySelector("#hotspotPasswordRow"),
-  baseUrlInput: document.querySelector("#baseUrlInput"),
-  apiKeyInput: document.querySelector("#apiKeyInput"),
-  transcribeModelInput: document.querySelector("#transcribeModelInput"),
-  summaryModelInput: document.querySelector("#summaryModelInput"),
-  contactsInput: document.querySelector("#contactsInput"),
-  settingsState: document.querySelector("#settingsState"),
-  settingsDot: document.querySelector("#settingsDot"),
-  wifiState: document.querySelector("#wifiState"),
-  wifiDot: document.querySelector("#wifiDot"),
-  deviceState: document.querySelector("#deviceState"),
-  deviceDot: document.querySelector("#deviceDot"),
-  pwaState: document.querySelector("#pwaState"),
-  pwaDot: document.querySelector("#pwaDot"),
-  hotspotName: document.querySelector("#hotspotName"),
-  hotspotHint: document.querySelector("#hotspotHint"),
-  bleButton: document.querySelector("#bleButton"),
-  confirmWifiButton: document.querySelector("#confirmWifiButton"),
-  downloadButton: document.querySelector("#downloadButton"),
-  manualImportInput: document.querySelector("#manualImportInput"),
-  clearButton: document.querySelector("#clearButton"),
-  transcribeAllButton: document.querySelector("#transcribeAllButton"),
-  summarizeAllButton: document.querySelector("#summarizeAllButton"),
-  logOutput: document.querySelector("#logOutput"),
-  recordingsList: document.querySelector("#recordingsList"),
-  recordingTemplate: document.querySelector("#recordingTemplate"),
-  recordingCount: document.querySelector("#recordingCount"),
-  transcribedCount: document.querySelector("#transcribedCount"),
-  summarizedCount: document.querySelector("#summarizedCount")
-};
-
-let dbPromise;
-let recordings = [];
-let objectUrls = new Map();
-let deferredInstallPrompt = null;
-
-function openDb() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("recordings")) {
-        db.createObjectStore("recordings", { keyPath: "id" });
+function parseJsonLoose(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        return null;
       }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  return dbPromise;
-}
-
-async function dbAction(mode, callback) {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("recordings", mode);
-    const store = tx.objectStore("recordings");
-    const result = callback(store);
-    tx.oncomplete = () => resolve(result);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function getAllRecordings() {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("recordings", "readonly");
-    const request = tx.objectStore("recordings").getAll();
-    request.onsuccess = () => resolve(request.result.sort((a, b) => b.createdAt - a.createdAt));
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function saveSettings(settings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-}
-
-function loadSettings() {
-  try {
-    return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || null;
-  } catch {
+    }
     return null;
   }
 }
 
-function loadHotspot() {
-  try {
-    return JSON.parse(localStorage.getItem(HOTSPOT_KEY)) || null;
-  } catch {
-    return null;
+function extractSsid(text) {
+  const jsonLike = text.match(/"wifiName"\s*:\s*"([^"]+)"/i);
+  if (jsonLike) return jsonLike[1];
+  const named = text.match(/(?:ssid|wifi|wifiName)\s*[:=]\s*([A-Za-z0-9_. -]{3,64})/i);
+  if (named) return named[1].trim();
+  const cb08 = text.match(/\bCB08[A-Za-z0-9_.-]{0,48}\b/);
+  return cb08 ? cb08[0] : "";
+}
+
+function setHotspotName(name) {
+  state.hotspotName = name;
+  localStorage.setItem(HOTSPOT_KEY, name);
+  updateDevicePanel();
+  logLine(`Recorder hotspot: ${name}`);
+}
+
+function encodeText(text) {
+  return textEncoder.encode(text);
+}
+
+function parseHex(value) {
+  const clean = value.replace(/0x/gi, "").replace(/[^a-fA-F0-9]/g, "");
+  if (!clean || clean.length % 2) {
+    throw new Error("Enter complete hex bytes.");
   }
-}
-
-function saveHotspot(hotspot) {
-  localStorage.setItem(HOTSPOT_KEY, JSON.stringify(hotspot));
-}
-
-function normalizeBaseUrl(baseUrl) {
-  return baseUrl.trim().replace(/\/$/, "");
-}
-
-function joinUrl(baseUrl, path) {
-  return `${normalizeBaseUrl(baseUrl)}${path.startsWith("/") ? path : `/${path}`}`;
-}
-
-function log(message) {
-  const time = new Date().toLocaleTimeString();
-  elements.logOutput.textContent = `[${time}] ${message}\n${elements.logOutput.textContent}`.slice(0, 9000);
-}
-
-function setStatus(kind, state, variant = "muted") {
-  const stateNode = elements[`${kind}State`];
-  const dotNode = elements[`${kind}Dot`];
-  stateNode.textContent = state;
-  dotNode.className = `status-dot ${variant}`;
-}
-
-function setOfflineReady(ready, message = "") {
-  setStatus("pwa", ready ? "Ready" : "Preparing", ready ? "ok" : "muted");
-  elements.offlineBadge.textContent = message || (ready ? "Offline ready" : "Preparing offline");
-  elements.offlineBadge.classList.toggle("ready", ready);
-}
-
-function renderSettingsState() {
-  const settings = loadSettings();
-  const ready = Boolean(settings?.baseUrl && settings?.apiKey && settings?.transcribeModel && settings?.summaryModel);
-  setStatus("settings", ready ? "Ready" : "Needed", ready ? "ok" : "");
-  return ready;
-}
-
-function renderHotspotState() {
-  const hotspot = loadHotspot();
-  if (hotspot?.ssid) {
-    elements.hotspotName.textContent = hotspot.ssid;
-    elements.hotspotHint.textContent = hotspot.password
-      ? `Password discovered: ${hotspot.password}. Connect manually in your system WiFi settings.`
-      : "Connect manually in your system WiFi settings.";
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(clean.slice(index * 2, index * 2 + 2), 16);
   }
+  return bytes;
 }
 
-function showHotspotDialog(hotspot) {
-  elements.hotspotDialogSsid.textContent = hotspot.ssid;
-  elements.hotspotDialogPassword.textContent = hotspot.password || "";
-  elements.hotspotPasswordRow.hidden = !hotspot.password;
-  if (!elements.hotspotDialog.open) elements.hotspotDialog.showModal();
-}
-
-function fillSettingsForm() {
-  const settings = loadSettings() || {};
-  elements.baseUrlInput.value = settings.baseUrl || "https://api.openai.com/v1";
-  elements.apiKeyInput.value = settings.apiKey || "";
-  elements.transcribeModelInput.value = settings.transcribeModel || "gpt-4o-transcribe-diarize";
-  elements.summaryModelInput.value = settings.summaryModel || "gpt-4.1";
-  elements.contactsInput.value = settings.contacts || [
-    "*   [Contact Name 1] - [Title/Role, e.g., Software Engineer]",
-    "*   [Contact Name 2] - [Title/Role, e.g., Project Manager]",
-    "*   [Contact Name 3] - [Title/Role, e.g., Mentor / Collaborator]",
-    "*   [Contact Name 4] - [Title/Role, e.g., Client / Stakeholder]",
-    "*   *(Add/Modify this list as needed)*"
-  ].join("\n");
-}
-
-function openSettings() {
-  fillSettingsForm();
-  elements.settingsDialog.showModal();
-}
-
-async function refreshRecordings() {
-  recordings = await getAllRecordings();
-  renderRecordings();
-}
-
-function revokeObjectUrls() {
-  objectUrls.forEach((url) => URL.revokeObjectURL(url));
-  objectUrls = new Map();
-}
-
-function renderRecordings() {
-  revokeObjectUrls();
-  elements.recordingCount.textContent = recordings.length;
-  elements.transcribedCount.textContent = recordings.filter((item) => item.transcribedAt).length;
-  elements.summarizedCount.textContent = recordings.filter((item) => item.summarizedAt).length;
-  elements.recordingsList.innerHTML = "";
-
-  if (!recordings.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No recordings downloaded yet.";
-    elements.recordingsList.append(empty);
-    return;
+function base64ToBytes(value) {
+  const binary = atob(value.replace(/^data:.*?;base64,/, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
   }
+  return bytes;
+}
 
-  recordings.forEach((recording) => {
-    const node = elements.recordingTemplate.content.cloneNode(true);
-    const card = node.querySelector(".recording-card");
-    const title = node.querySelector("h3");
-    const meta = node.querySelector(".meta");
-    const audio = node.querySelector("audio");
-    const transcriptBlock = node.querySelector(".transcript-block");
-    const summaryBlock = node.querySelector(".summary-block");
-    const transcriptPre = transcriptBlock.querySelector("pre");
-    const summaryPre = summaryBlock.querySelector("pre");
-    const transcribeButton = node.querySelector(".transcribe-button");
-    const summarizeButton = node.querySelector(".summarize-button");
-    const downloadFileButton = node.querySelector(".download-file-button");
+function describeProperties(properties) {
+  return [
+    properties.read ? "read" : "",
+    properties.write ? "write" : "",
+    properties.writeWithoutResponse ? "write-no-response" : "",
+    properties.notify ? "notify" : "",
+    properties.indicate ? "indicate" : ""
+  ].filter(Boolean).join(", ") || "unknown";
+}
 
-    const url = URL.createObjectURL(recording.blob);
-    objectUrls.set(recording.id, url);
-    title.textContent = recording.name;
-    meta.textContent = [
-      recording.date ? `Recorded ${new Date(recording.date).toLocaleString()}` : null,
-      `${formatBytes(recording.blob.size)}`,
-      recording.transcribedAt ? "Transcribed" : "Not transcribed",
-      recording.summarizedAt ? "Summarized" : "Not summarized"
-    ].filter(Boolean).join(" · ");
-    audio.src = url;
+function shortUuid(uuid) {
+  const match = String(uuid).match(/0000(ae2[0-4])-0000/i);
+  return match ? match[1].toUpperCase() : String(uuid).slice(0, 8).toUpperCase();
+}
 
-    transcriptPre.textContent = recording.transcript || "No transcript yet.";
-    summaryPre.textContent = recording.summary || "No summary yet.";
-    transcriptBlock.open = Boolean(recording.transcript);
-    summaryBlock.open = Boolean(recording.summary);
-    summarizeButton.disabled = !recording.transcript;
-
-    transcribeButton.addEventListener("click", () => transcribeRecording(recording.id));
-    summarizeButton.addEventListener("click", () => summarizeRecording(recording.id));
-    downloadFileButton.addEventListener("click", () => {
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = recording.name;
-      anchor.click();
-    });
-
-    card.dataset.id = recording.id;
-    elements.recordingsList.append(node);
-  });
+function remoteFileKey(file) {
+  return `${file.name}|${file.size || 0}|${file.time || ""}`;
 }
 
 function formatBytes(bytes) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const sizeIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** sizeIndex).toFixed(sizeIndex ? 1 : 0)} ${units[sizeIndex]}`;
-}
-
-function parseDate(value) {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-function inferNameFromUrl(url, fallbackIndex) {
-  try {
-    const pathname = new URL(url, DEVICE_BASE_URL).pathname;
-    const name = pathname.split("/").filter(Boolean).pop();
-    return decodeURIComponent(name || `recording-${fallbackIndex + 1}.wav`);
-  } catch {
-    return `recording-${fallbackIndex + 1}.wav`;
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = value / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
   }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
 }
 
-function isAudioUrl(url) {
-  const lower = url.toLowerCase().split("?")[0];
-  return AUDIO_EXTENSIONS.some((extension) => lower.endsWith(extension));
+function formatDate(value) {
+  if (!value) return "Unknown time";
+  const number = Number(value);
+  const date = Number.isFinite(number) && String(value).length <= 10
+    ? new Date(number * 1000)
+    : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
 }
 
-function makeRecordingId(sourceUrl, blob) {
-  return `${sourceUrl}|${blob.size}`;
+function slugify(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "recording";
 }
 
-async function requestJsonOrText(path) {
-  const response = await fetch(joinUrl(DEVICE_BASE_URL, path), { cache: "no-store" });
-  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
-  const text = await response.text();
-  try {
-    return { path, type: "json", body: JSON.parse(text) };
-  } catch {
-    return { path, type: "text", body: text };
-  }
+function guessMime(name) {
+  const lower = String(name || "").toLowerCase();
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
+  if (lower.endsWith(".webm")) return "audio/webm";
+  if (lower.endsWith(".opus")) return "audio/ogg";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  return "audio/wav";
 }
 
-function extractRecordingCandidates(payload) {
-  if (payload.type === "json") {
-    const items = Array.isArray(payload.body)
-      ? payload.body
-      : payload.body.recordings || payload.body.files || payload.body.items || [];
-    return items.map((item, index) => {
-      if (typeof item === "string") {
-        return { url: item, name: inferNameFromUrl(item, index), metadata: { source: payload.path } };
-      }
-      const url = item.url || item.href || item.path || item.name || item.file || item.filename;
-      return {
-        url,
-        name: item.name || item.filename || inferNameFromUrl(url || "", index),
-        date: parseDate(item.date || item.createdAt || item.created || item.modified || item.timestamp),
-        metadata: { ...item, source: payload.path }
-      };
-    }).filter((item) => item.url && isAudioUrl(item.url));
-  }
-
-  const doc = new DOMParser().parseFromString(payload.body, "text/html");
-  return [...doc.querySelectorAll("a[href]")]
-    .map((anchor, index) => {
-      const href = anchor.getAttribute("href");
-      return {
-        url: href,
-        name: anchor.textContent.trim() || inferNameFromUrl(href, index),
-        metadata: { source: payload.path }
-      };
-    })
-    .filter((item) => item.url && isAudioUrl(item.url));
+function ensureAudioExtension(name, mime) {
+  if (/\.(mp3|mp4|mpeg|mpga|m4a|wav|webm)$/i.test(name)) return name;
+  if (mime === "audio/mpeg") return `${name}.mp3`;
+  if (mime === "audio/webm") return `${name}.webm`;
+  if (mime === "audio/mp4") return `${name}.m4a`;
+  return `${name}.wav`;
 }
 
-async function discoverAllMethods() {
-  const allCandidates = [];
-  const seen = new Set();
+function hexPreview(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const hex = Array.from(view.slice(0, 48)).map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+  return view.length > 48 ? `${hex} ...` : hex;
+}
 
-  const addUnique = (candidates) => {
-    for (const c of candidates) {
-      const key = c.wsPath || c.url;
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        allCandidates.push(c);
-      }
+function printablePreview(bytes) {
+  const text = textDecoder.decode(bytes).replace(/[^\x20-\x7E]+/g, " ").trim();
+  return text ? `"${text.slice(0, 120)}"` : "";
+}
+
+function logLine(message, level = "info") {
+  const stamp = new Date().toLocaleTimeString();
+  const prefix = level === "error" ? "ERR" : level === "warn" ? "WARN" : "INFO";
+  state.logs.push(`[${stamp}] ${prefix} ${message}`);
+  state.logs = state.logs.slice(-220);
+  renderLog();
+}
+
+function renderLog() {
+  els.logOutput.textContent = state.logs.join("\n");
+  els.logOutput.scrollTop = els.logOutput.scrollHeight;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
+}
+
+function markdownToHtml(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  let html = "";
+  let list = "";
+
+  const closeList = () => {
+    if (list) {
+      html += `</${list}>`;
+      list = "";
     }
   };
 
-  // WebSocket discovery
-  log(`--- WebSocket (${DEVICE_WS_URL}) ---`);
-  if (!canUseInsecureDeviceSocket()) {
-    log(`SKIP: HTTPS pages cannot open insecure ws:// sockets. Serve over HTTP or localhost to use the WebSocket path.`);
-  } else {
-    const wsCandidates = await discoverRecordingCandidatesOverWebSocket();
-    if (wsCandidates.length) {
-      log(`WebSocket: SUCCESS — ${wsCandidates.length} file(s) found.`);
-      addUnique(wsCandidates);
-    } else {
-      log(`WebSocket: no files found (device did not respond or list was empty).`);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
     }
-  }
 
-  // HTTP endpoint discovery
-  log(`--- HTTP endpoints (${DEVICE_BASE_URL}) ---`);
-  for (const endpoint of RECORDING_ENDPOINTS) {
-    try {
-      const payload = await requestJsonOrText(endpoint);
-      const candidates = extractRecordingCandidates(payload);
-      if (candidates.length) {
-        log(`HTTP ${endpoint}: SUCCESS — ${candidates.length} file(s) found.`);
-        addUnique(candidates);
-      } else {
-        log(`HTTP ${endpoint}: responded (${payload.type}) — no audio files in response.`);
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length === 1 ? 2 : heading[1].length;
+      html += `<h${level}>${inlineMarkdown(heading[2])}</h${level}>`;
+      continue;
+    }
+
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (list !== "ul") {
+        closeList();
+        html += "<ul>";
+        list = "ul";
       }
-    } catch (error) {
-      log(`HTTP ${endpoint}: FAILED — ${error.message}`);
-    }
-  }
-
-  log(`--- Discovery complete: ${allCandidates.length} unique file(s) across all methods ---`);
-  return allCandidates;
-}
-
-function canUseInsecureDeviceSocket() {
-  return location.protocol !== "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
-}
-
-function extractCandidatesFromAnyPayload(payload) {
-  const found = [];
-  const visit = (value) => {
-    if (!value) return;
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    if (typeof value !== "object") return;
-
-    const path = value.path || value.file || value.url || value.href || value.filename || value.name;
-    const name = value.name || value.recordName || value.filename || (path ? inferNameFromUrl(path, found.length) : "");
-    const looksLikeAudio = path && (isAudioUrl(path) || /\.pcm$/i.test(path) || /\.opus$/i.test(path));
-    if (looksLikeAudio) {
-      found.push({
-        url: path,
-        wsPath: path,
-        name,
-        date: parseDate(value.date || value.time || value.createdAt || value.created),
-        metadata: { ...value, source: DEVICE_WS_URL }
-      });
+      html += `<li>${inlineMarkdown(bullet[1])}</li>`;
+      continue;
     }
 
-    Object.values(value).forEach(visit);
-  };
-  visit(payload);
-  return found;
-}
-
-async function discoverRecordingCandidatesOverWebSocket() {
-  if (!canUseInsecureDeviceSocket()) {
-    log(`Skipping ${DEVICE_WS_URL}; HTTPS pages cannot usually open insecure ws:// device sockets.`);
-    return [];
-  }
-
-  return new Promise((resolve) => {
-    let socket;
-    let settled = false;
-    const candidates = [];
-    const settle = () => {
-      if (settled) return;
-      settled = true;
-      try {
-        socket?.close();
-      } catch {
-        // No-op.
+    const numbered = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (numbered) {
+      if (list !== "ol") {
+        closeList();
+        html += "<ol>";
+        list = "ol";
       }
-      resolve(dedupeCandidates(candidates));
-    };
-    const timeout = setTimeout(settle, 5000);
-
-    try {
-      log(`Checking recorder WebSocket ${DEVICE_WS_URL}`);
-      socket = new WebSocket(DEVICE_WS_URL);
-      socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", () => {
-        log(`WebSocket connected. Sending ${RECORDING_WS_COMMANDS.length} file-list command(s):`);
-        RECORDING_WS_COMMANDS.forEach((command) => {
-          const payload = JSON.stringify(command);
-          log(`  Send: ${payload}`);
-          socket.send(payload);
-        });
-      });
-      socket.addEventListener("message", (event) => {
-        if (typeof event.data !== "string") {
-          log(`WebSocket received ${event.data.byteLength || 0} binary bytes during discovery (not a file list).`);
-          return;
-        }
-        log(`WebSocket recv: ${event.data.slice(0, 300)}`);
-        try {
-          candidates.push(...extractCandidatesFromAnyPayload(JSON.parse(event.data)));
-        } catch {
-          // Some device frames may be plain status text.
-        }
-        if (candidates.length) {
-          clearTimeout(timeout);
-          setTimeout(settle, 500);
-        }
-      });
-      socket.addEventListener("error", () => {
-        log("Recorder WebSocket did not respond.");
-      });
-      socket.addEventListener("close", () => {
-        clearTimeout(timeout);
-        settle();
-      });
-    } catch (error) {
-      clearTimeout(timeout);
-      log(`Recorder WebSocket failed: ${error.message}`);
-      settle();
-    }
-  });
-}
-
-function dedupeCandidates(candidates) {
-  const seen = new Set();
-  return candidates.filter((candidate) => {
-    const key = candidate.wsPath || candidate.url;
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-async function downloadRecordings() {
-  setStatus("device", "Scanning", "");
-  elements.downloadButton.disabled = true;
-  try {
-    const candidates = await discoverAllMethods();
-    if (!candidates.length) {
-      throw new Error("No recordings found via any method. Check the log above for details.");
+      html += `<li>${inlineMarkdown(numbered[1])}</li>`;
+      continue;
     }
 
-    log(`--- Downloading ${candidates.length} file(s) ---`);
-    let saved = 0;
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index];
-      log(`Downloading [${index + 1}/${candidates.length}] ${candidate.name}...`);
-      try {
-        const blob = await downloadCandidateDiagnostic(candidate);
-        const url = new URL(candidate.url, DEVICE_BASE_URL).href;
-        const id = makeRecordingId(url, blob);
-        await dbAction("readwrite", (store) => store.put({
-          id,
-          name: candidate.name || inferNameFromUrl(url, index),
-          sourceUrl: url,
-          date: candidate.date || null,
-          metadata: candidate.metadata || {},
-          blob,
-          downloadedAt: new Date().toISOString(),
-          createdAt: Date.now() - index,
-          transcript: "",
-          transcribedAt: "",
-          summary: "",
-          summarizedAt: ""
-        }));
-        saved += 1;
-      } catch {
-        log(`  Skipping ${candidate.name}: all transfer methods failed.`);
-      }
-    }
-
-    setStatus("device", saved ? "Downloaded" : "Failed", saved ? "ok" : "error");
-    log(`--- Saved ${saved} of ${candidates.length} recording(s) ---`);
-    await refreshRecordings();
-  } catch (error) {
-    setStatus("device", "Failed", "error");
-    log(`Download error: ${error.message}`);
-  } finally {
-    elements.downloadButton.disabled = false;
-  }
-}
-
-async function downloadRecordingOverHttp(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-  return response.blob();
-}
-
-async function downloadRecordingOverWebSocket(candidate) {
-  if (!canUseInsecureDeviceSocket()) {
-    throw new Error("This HTTPS page cannot open the recorder's insecure ws:// file socket.");
+    closeList();
+    html += `<p>${inlineMarkdown(trimmed)}</p>`;
   }
 
-  return new Promise((resolve, reject) => {
-    let socket;
-    let done = false;
-    let idleTimer;
-    const chunks = [];
-    const transferCommands = [
-      { cmd: "5", path: candidate.wsPath },
-      { cmd: "5", data: { path: candidate.wsPath } },
-      { cmd: "download", path: candidate.wsPath }
-    ];
-
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(idleTimer);
-      try {
-        socket?.close();
-      } catch {
-        // No-op.
-      }
-      if (!chunks.length) {
-        reject(new Error(`Recorder did not send binary audio for ${candidate.name}.`));
-        return;
-      }
-      const type = candidate.name.toLowerCase().endsWith(".wav") ? "audio/wav" : "application/octet-stream";
-      resolve(new Blob(chunks, { type }));
-    };
-
-    const fail = (message) => {
-      if (done) return;
-      done = true;
-      clearTimeout(idleTimer);
-      try {
-        socket?.close();
-      } catch {
-        // No-op.
-      }
-      reject(new Error(message));
-    };
-
-    try {
-      socket = new WebSocket(DEVICE_WS_URL);
-      socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", () => {
-        log(`Requesting ${candidate.name} over recorder WebSocket.`);
-        transferCommands.forEach((command) => socket.send(JSON.stringify(command)));
-        idleTimer = setTimeout(finish, 6000);
-      });
-      socket.addEventListener("message", (event) => {
-        if (typeof event.data === "string") {
-          log(`Recorder transfer: ${event.data.slice(0, 220)}`);
-          try {
-            const payload = JSON.parse(event.data);
-            const progress = Number(payload?.data?.progress ?? payload?.progress);
-            if (progress >= 100 && chunks.length) setTimeout(finish, 300);
-          } catch {
-            // Some status frames are not JSON.
-          }
-          return;
-        }
-        chunks.push(event.data);
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(finish, 1200);
-      });
-      socket.addEventListener("error", () => fail("Recorder WebSocket transfer failed."));
-      socket.addEventListener("close", () => {
-        if (!done && chunks.length) finish();
-      });
-    } catch (error) {
-      fail(error.message);
-    }
-  });
+  closeList();
+  return html || "No summary yet.";
 }
 
-async function downloadCandidateDiagnostic(candidate) {
-  const wsPath = candidate.wsPath || candidate.url;
-  const httpUrl = new URL(candidate.url, DEVICE_BASE_URL).href;
-
-  // Try WebSocket transfer (cmd: "5") — always attempt, even for HTTP-discovered files
-  if (!canUseInsecureDeviceSocket()) {
-    log(`  WebSocket transfer SKIP: HTTPS page cannot open ws:// socket.`);
-  } else {
-    try {
-      const blob = await downloadRecordingOverWebSocket({ ...candidate, wsPath });
-      log(`  WebSocket transfer SUCCESS: ${formatBytes(blob.size)}.`);
-      return blob;
-    } catch (error) {
-      log(`  WebSocket transfer FAILED: ${error.message}.`);
-    }
-  }
-
-  // Try HTTP transfer
-  try {
-    const blob = await downloadRecordingOverHttp(httpUrl);
-    log(`  HTTP transfer SUCCESS: ${formatBytes(blob.size)}.`);
-    return blob;
-  } catch (error) {
-    log(`  HTTP transfer FAILED: ${error.message}.`);
-    throw error;
-  }
+function inlineMarkdown(value) {
+  return escapeHtml(value)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
 }
-
-async function importManualFiles(fileList) {
-  const files = [...fileList].filter((file) => file.type.startsWith("audio/") || isAudioUrl(file.name));
-  if (!files.length) return;
-
-  let saved = 0;
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
-    const recording = {
-      id: makeRecordingId(`manual:${file.name}:${file.lastModified}`, file),
-      name: file.name,
-      sourceUrl: "manual-import",
-      date: file.lastModified ? new Date(file.lastModified).toISOString() : null,
-      metadata: { source: "manual-import", type: file.type },
-      blob: file,
-      downloadedAt: new Date().toISOString(),
-      createdAt: Date.now() - index,
-      transcript: "",
-      transcribedAt: "",
-      summary: "",
-      summarizedAt: ""
-    };
-    await dbAction("readwrite", (store) => store.put(recording));
-    saved += 1;
-  }
-  elements.manualImportInput.value = "";
-  await refreshRecordings();
-  log(`Imported ${saved} local audio file(s).`);
-}
-
-async function tryBleDiscovery() {
-  if (!navigator.bluetooth) {
-    log("Web Bluetooth is not available. Use Chrome or Edge over HTTPS.");
-    return;
-  }
-
-  try {
-    log("Opening Bluetooth picker — looking for devices named CB08...");
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "CB08" }],
-      optionalServices: [RECORDER_BLE_SERVICE, "battery_service", "device_information"]
-    });
-
-    log(`Selected: "${device.name}". Connecting to GATT server...`);
-    setStatus("wifi", "BLE connecting", "");
-
-    // Race the connect against a 12s timeout — a hanging connect usually means
-    // another app (e.g. SoniCloud) already holds the BLE connection to this device.
-    const server = await Promise.race([
-      device.gatt.connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(
-          "GATT connect timed out (12s). If SoniCloud is open on this Mac, quit it and try again."
-        )), 12000)
-      )
-    ]);
-    setStatus("wifi", "BLE connected", "");
-
-    log("GATT connected. Enumerating services...");
-    // Try the known recorder service UUID directly first (most reliable),
-    // then fall back to getPrimaryServices() for any other services present.
-    const services = [];
-    try {
-      services.push(await server.getPrimaryService(RECORDER_BLE_SERVICE));
-      log(`Found recorder service ${RECORDER_BLE_SERVICE}.`);
-    } catch {
-      log(`Recorder service ${RECORDER_BLE_SERVICE} not found on device.`);
-    }
-    const allServices = await server.getPrimaryServices().catch(() => []);
-    for (const s of allServices) {
-      if (!services.some((x) => x.uuid === s.uuid)) services.push(s);
-    }
-    log(`Found ${services.length} GATT service(s) total.`);
-    const discovered = [device.name || ""];
-    const writableCharacteristics = [];
-
-    for (const service of services) {
-      log(`Service: ${service.uuid}`);
-      const characteristics = await service.getCharacteristics();
-      for (const characteristic of characteristics) {
-        const uuid = characteristic.uuid.toLowerCase();
-        const props = Object.entries(characteristic.properties)
-          .filter(([, v]) => v).map(([k]) => k).join(", ");
-        const isKnown = RECORDER_BLE_CHARACTERISTICS.includes(uuid);
-        log(`  Char ${uuid.slice(4, 8).toUpperCase()} [${props}]${isKnown ? " ← known recorder char" : ""}`);
-
-        if (characteristic.properties.notify || characteristic.properties.indicate) {
-          try {
-            await characteristic.startNotifications();
-            characteristic.addEventListener("characteristicvaluechanged", (event) => {
-              const text = decodeBleValue(event.target.value);
-              if (text) {
-                log(`  BLE notify ${uuid.slice(4, 8).toUpperCase()}: ${text.slice(0, 220)}`);
-                discovered.push(text);
-                handleDiscoveredHotspot(discovered);
-              }
-            });
-          } catch (error) {
-            log(`  Notify subscribe failed: ${error.message}`);
-          }
-        }
-
-        if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
-          writableCharacteristics.push(characteristic);
-        }
-
-        if (characteristic.properties.read) {
-          try {
-            const text = decodeBleValue(await characteristic.readValue());
-            if (text) {
-              log(`  BLE read ${uuid.slice(4, 8).toUpperCase()}: ${text.slice(0, 220)}`);
-              discovered.push(text);
-              handleDiscoveredHotspot(discovered);
-            }
-          } catch (error) {
-            log(`  Read failed: ${error.message}`);
-          }
-        }
-      }
-    }
-
-    log(`Found ${writableCharacteristics.length} writable characteristic(s). Requesting WiFi hotspot credentials...`);
-    await probeBleForWifiName(writableCharacteristics, discovered);
-
-    if (handleDiscoveredHotspot(discovered)) {
-      setStatus("wifi", "Hotspot found", "ok");
-    } else {
-      setStatus("wifi", "Manual connect", "");
-      log("No hotspot credentials found in BLE responses. Connect to the recorder WiFi manually, then click I am connected.");
-    }
-  } catch (error) {
-    setStatus("wifi", "BLE failed", "error");
-    log(`BLE discovery failed: ${error.message}`);
-  }
-}
-
-function handleDiscoveredHotspot(discovered) {
-  const hotspot = extractHotspotDetails(discovered);
-  if (!hotspot.ssid && !hotspot.password) return false;
-
-  const savedHotspot = {
-    ssid: hotspot.ssid || "SonicApp recorder hotspot",
-    password: hotspot.password || "",
-    discoveredAt: new Date().toISOString()
-  };
-  saveHotspot(savedHotspot);
-  renderHotspotState();
-  showHotspotDialog(savedHotspot);
-  setStatus("wifi", "Hotspot found", "ok");
-  log(`BLE discovery found hotspot details: ${savedHotspot.ssid}. Connect to it in system WiFi settings.`);
-  return true;
-}
-
-function decodeBleValue(value) {
-  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  const text = BLE_TEXT_DECODER.decode(bytes).replace(/\0/g, "").trim();
-  if (text) return text;
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
-}
-
-async function probeBleForWifiName(characteristics, discovered) {
-  if (!characteristics.length) {
-    log("No writable characteristics found. Cannot send WiFi hotspot probe commands.");
-    return;
-  }
-
-  for (const characteristic of characteristics) {
-    const uuid = characteristic.uuid.slice(4, 8).toUpperCase();
-    for (const command of BLE_WIFI_PROBE_COMMANDS) {
-      const payload = typeof command === "string" ? command : JSON.stringify(command);
-      try {
-        const bytes = BLE_TEXT_ENCODER.encode(payload);
-        if (characteristic.properties.writeWithoutResponse && characteristic.writeValueWithoutResponse) {
-          await characteristic.writeValueWithoutResponse(bytes);
-        } else {
-          await characteristic.writeValue(bytes);
-        }
-        log(`  BLE write → ${uuid}: ${payload}`);
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      } catch (error) {
-        log(`  BLE write → ${uuid} rejected (${payload.slice(0, 40)}): ${error.message}`);
-      }
-    }
-  }
-
-  log("Waiting 2s for device response...");
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-  const hotspot = extractHotspotDetails(discovered);
-  if (!hotspot.ssid) {
-    log("No WiFi credentials found in BLE responses. All raw BLE data received:");
-    discovered.filter(Boolean).forEach((item, i) => log(`  [${i}] ${item.slice(0, 120)}`));
-  }
-}
-
-function extractHotspotDetails(chunks) {
-  const combined = chunks.filter(Boolean).join("\n");
-  const parsed = parseJsonHotspotDetails(chunks) || {};
-  return {
-    ssid: parsed.ssid || findValue(combined, /"wifiName"\s*:\s*"([^"]+)"/i, 1) || findValue(combined, /(ssid|hotspot|wifi(?:name)?)[\s:=]+([^\n\r,;{}"]+)/i, 2),
-    password: parsed.password || findValue(combined, /(pass|password|pwd)[\s:=]+([^\n\r,;{}"]+)/i, 2)
-  };
-}
-
-function parseJsonHotspotDetails(chunks) {
-  for (const chunk of chunks) {
-    try {
-      const payload = JSON.parse(chunk);
-      const data = payload.data || payload;
-      const ssid = data.wifiName || data.ssid || data.hotspot || data.wifi;
-      const password = data.password || data.pass || data.pwd || data.wifiPassword;
-      if (ssid || password) return { ssid, password };
-    } catch {
-      // Not JSON.
-    }
-  }
-  return null;
-}
-
-function findValue(text, regex, group = 2) {
-  const match = text.match(regex);
-  return match?.[group]?.trim() || "";
-}
-
-async function pingDevice() {
-  setStatus("wifi", "Checking", "");
-  try {
-    await fetch(DEVICE_BASE_URL, { cache: "no-store", mode: "no-cors" });
-    setStatus("wifi", "Connected", "ok");
-    log(`Reached ${DEVICE_BASE_URL}. Starting file discovery across all methods...`);
-    downloadRecordings();
-  } catch (error) {
-    setStatus("wifi", "Unreachable", "error");
-    log(`Could not reach ${DEVICE_BASE_URL}: ${error.message}`);
-  }
-}
-
-async function getRecording(id) {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("recordings", "readonly");
-    const request = tx.objectStore("recordings").get(id);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function updateRecording(recording) {
-  await dbAction("readwrite", (store) => store.put(recording));
-  await refreshRecordings();
-}
-
-function requireSettings() {
-  const settings = loadSettings();
-  if (!settings?.baseUrl || !settings?.apiKey || !settings?.transcribeModel || !settings?.summaryModel) {
-    openSettings();
-    throw new Error("AI settings are required first.");
-  }
-  return settings;
-}
-
-async function transcribeRecording(id) {
-  const settings = requireSettings();
-  const recording = await getRecording(id);
-  if (!recording) return;
-
-  setStatus("device", "Transcribing", "");
-  log(`Transcribing ${recording.name} with ${settings.transcribeModel}.`);
-  try {
-    const formData = new FormData();
-    formData.append("model", settings.transcribeModel);
-    formData.append("file", recording.blob, recording.name);
-    formData.append("response_format", "json");
-
-    const response = await fetch(joinUrl(settings.baseUrl, "/audio/transcriptions"), {
-      method: "POST",
-      headers: { Authorization: `Bearer ${settings.apiKey}` },
-      body: formData
-    });
-    if (!response.ok) throw new Error(await response.text());
-    const result = await response.json();
-    recording.transcript = extractTranscriptText(result);
-    recording.transcriptionRaw = result;
-    recording.transcribedAt = new Date().toISOString();
-    await updateRecording(recording);
-    setStatus("device", "Transcribed", "ok");
-    log(`Transcribed ${recording.name}.`);
-  } catch (error) {
-    setStatus("device", "Transcribe failed", "error");
-    log(`Transcription failed: ${error.message}`);
-  }
-}
-
-function extractTranscriptText(result) {
-  if (typeof result === "string") return result;
-  if (result.text) return result.text;
-  if (Array.isArray(result.segments)) {
-    return result.segments.map((segment) => {
-      const speaker = segment.speaker || segment.label || segment.role || "Speaker";
-      return `${speaker}: ${segment.text || ""}`.trim();
-    }).join("\n");
-  }
-  return JSON.stringify(result, null, 2);
-}
-
-async function summarizeRecording(id) {
-  const settings = requireSettings();
-  const recording = await getRecording(id);
-  if (!recording?.transcript) return;
-
-  setStatus("device", "Summarizing", "");
-  log(`Summarizing ${recording.name} with ${settings.summaryModel}.`);
-  try {
-    const contactList = settings.contacts?.trim() || "*   No contact list provided.";
-    const prompt = SUMMARY_SYSTEM_PROMPT
-      .replace("{{CONTACT_LIST}}", contactList)
-      .replace("{{TRANSCRIPTION_TEXT}}", recording.transcript);
-    const response = await fetch(joinUrl(settings.baseUrl, "/chat/completions"), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: settings.summaryModel,
-        messages: [
-          { role: "system", content: prompt },
-          { role: "user", content: "Generate the structured business summary from the transcription in the system prompt." }
-        ],
-        temperature: 0.2
-      })
-    });
-    if (!response.ok) throw new Error(await response.text());
-    const result = await response.json();
-    recording.summary = result.choices?.[0]?.message?.content || JSON.stringify(result, null, 2);
-    recording.summaryRaw = result;
-    recording.summarizedAt = new Date().toISOString();
-    await updateRecording(recording);
-    setStatus("device", "Summarized", "ok");
-    log(`Summarized ${recording.name}.`);
-  } catch (error) {
-    setStatus("device", "Summary failed", "error");
-    log(`Summary failed: ${error.message}`);
-  }
-}
-
-async function transcribeAll() {
-  for (const recording of recordings) {
-    if (!recording.transcribedAt) await transcribeRecording(recording.id);
-  }
-}
-
-async function summarizeAll() {
-  for (const recording of recordings) {
-    if (recording.transcript && !recording.summarizedAt) await summarizeRecording(recording.id);
-  }
-}
-
-async function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) {
-    setStatus("pwa", "Unavailable", "error");
-    elements.offlineBadge.textContent = "Offline unavailable";
-    log("Service workers are not supported in this browser.");
-    return;
-  }
-
-  try {
-    const registration = await navigator.serviceWorker.register("service-worker.js");
-    await navigator.serviceWorker.ready;
-    const cache = await caches.open(APP_CACHE_NAME);
-    const cachedKeys = await cache.keys();
-    setOfflineReady(cachedKeys.length > 0);
-    log("Offline app shell is cached. You can switch to the recorder hotspot and keep using this page.");
-
-    if (registration.waiting) registration.waiting.postMessage({ type: "SKIP_WAITING" });
-  } catch (error) {
-    setStatus("pwa", "Failed", "error");
-    elements.offlineBadge.textContent = "Offline cache failed";
-    log(`Offline setup failed: ${error.message}`);
-  }
-}
-
-function bindPwaEvents() {
-  window.addEventListener("beforeinstallprompt", (event) => {
-    event.preventDefault();
-    deferredInstallPrompt = event;
-    elements.installButton.hidden = false;
-  });
-
-  window.addEventListener("appinstalled", () => {
-    deferredInstallPrompt = null;
-    elements.installButton.hidden = true;
-    log("SonicApp Recorder Sync was installed.");
-  });
-
-  window.addEventListener("online", () => {
-    if (elements.offlineBadge.classList.contains("ready")) {
-      elements.offlineBadge.textContent = "Offline ready";
-    }
-  });
-
-  window.addEventListener("offline", () => {
-    elements.offlineBadge.textContent = "Using offline app";
-  });
-}
-
-async function clearRecordings() {
-  if (!confirm("Clear all locally saved recordings, transcripts, and summaries?")) return;
-  await dbAction("readwrite", (store) => store.clear());
-  await refreshRecordings();
-  log("Cleared local recordings.");
-}
-
-function bindEvents() {
-  elements.settingsButton.addEventListener("click", openSettings);
-  elements.installButton.addEventListener("click", async () => {
-    if (!deferredInstallPrompt) return;
-    deferredInstallPrompt.prompt();
-    await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null;
-    elements.installButton.hidden = true;
-  });
-  elements.bleButton.addEventListener("click", tryBleDiscovery);
-  elements.confirmWifiButton.addEventListener("click", pingDevice);
-  elements.downloadButton.addEventListener("click", downloadRecordings);
-  elements.manualImportInput.addEventListener("change", (event) => importManualFiles(event.target.files));
-  elements.clearButton.addEventListener("click", clearRecordings);
-  elements.transcribeAllButton.addEventListener("click", transcribeAll);
-  elements.summarizeAllButton.addEventListener("click", summarizeAll);
-  elements.settingsForm.addEventListener("submit", (event) => {
-    if (event.submitter?.value === "cancel") return;
-    event.preventDefault();
-    saveSettings({
-      baseUrl: normalizeBaseUrl(elements.baseUrlInput.value),
-      apiKey: elements.apiKeyInput.value.trim(),
-      transcribeModel: elements.transcribeModelInput.value.trim(),
-      summaryModel: elements.summaryModelInput.value.trim(),
-      contacts: elements.contactsInput.value.trim()
-    });
-    elements.settingsDialog.close();
-    renderSettingsState();
-    log("Saved AI settings to localStorage.");
-  });
-}
-
-async function init() {
-  bindEvents();
-  bindPwaEvents();
-  renderSettingsState();
-  renderHotspotState();
-  await refreshRecordings();
-  await registerServiceWorker();
-  log("Ready. Start by confirming AI settings, then connect to the recorder hotspot.");
-  if (!renderSettingsState()) openSettings();
-}
-
-window.addEventListener("beforeunload", revokeObjectUrls);
-init();

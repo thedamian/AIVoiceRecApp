@@ -1,19 +1,17 @@
-const CACHE_VERSION = "sonicapp-pwa-v3";
-const APP_SHELL = [
+const CACHE_NAME = "sonicloud-web-v4";
+const APP_ASSETS = [
   "./",
-  "index.html",
-  "styles.css",
-  "app.js",
-  "manifest.webmanifest",
-  "icons/robot-192.png",
-  "icons/robot-512.png",
-  "icons/robot-maskable-512.png"
+  "./index.html",
+  "./styles.css",
+  "./app.js",
+  "./manifest.webmanifest",
+  "./icons/robot.svg"
 ];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_VERSION)
-      .then((cache) => cache.addAll(APP_SHELL))
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(APP_ASSETS))
       .then(() => self.skipWaiting())
   );
 });
@@ -21,7 +19,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_VERSION).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
   );
 });
@@ -37,23 +35,21 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_VERSION).then((cache) => cache.put("index.html", clone));
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
           return response;
         })
-        .catch(() => caches.match("index.html"))
+        .catch(() => caches.match("./index.html"))
     );
     return;
   }
 
   event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) return cachedResponse;
-      return fetch(request).then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_VERSION).then((cache) => cache.put(request, clone));
+    caches.match(request)
+      .then((cached) => cached || fetch(request).then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
         return response;
-      });
-    })
+      }))
   );
 });

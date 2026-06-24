@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Funny robot recorder icon">
+  <defs>
+    <linearGradient id="body" x1="96" y1="96" x2="430" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff7df"/>
+      <stop offset="0.48" stop-color="#48b6af"/>
+      <stop offset="1" stop-color="#5b5fba"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="136" y1="184" x2="376" y2="338" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#203033"/>
+      <stop offset="1" stop-color="#111719"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="#f6f0e8"/>
+  <path d="M256 84v58" stroke="#25231f" stroke-width="20" stroke-linecap="round"/>
+  <circle cx="256" cy="70" r="28" fill="#f2a93b" stroke="#25231f" stroke-width="14"/>
+  <rect x="88" y="138" width="336" height="278" rx="74" fill="url(#body)" stroke="#25231f" stroke-width="18"/>
+  <rect x="132" y="186" width="248" height="150" rx="42" fill="url(#screen)" stroke="#25231f" stroke-width="14"/>
+  <circle cx="210" cy="254" r="24" fill="#f2a93b"/>
+  <circle cx="302" cy="254" r="24" fill="#f2a93b"/>
+  <path d="M218 302c28 22 54 22 82 0" fill="none" stroke="#fffaf2" stroke-width="14" stroke-linecap="round"/>
+  <path d="M130 356h252" stroke="#25231f" stroke-width="16" stroke-linecap="round" opacity=".22"/>
+  <circle cx="172" cy="382" r="14" fill="#d94f3d" stroke="#25231f" stroke-width="8"/>
+  <circle cx="220" cy="382" r="14" fill="#20815a" stroke="#25231f" stroke-width="8"/>
+  <path d="M92 256H50m412 0h-42" stroke="#25231f" stroke-width="22" stroke-linecap="round"/>
+  <path d="M185 178c-24-28-54-30-78-6M327 178c24-28 54-30 78-6" fill="none" stroke="#25231f" stroke-width="12" stroke-linecap="round"/>
+</svg>
